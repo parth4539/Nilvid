@@ -4,6 +4,7 @@ import {
   Image as ImageIcon,
   Music,
   Plus,
+  RotateCcw,
   Sparkles,
   Trash2,
   Upload,
@@ -16,6 +17,7 @@ interface MediaBinProps {
   onOpenImportPicker: () => void;
   onFilesDropped: (files: FileList | File[]) => void;
   onLoadSamples: () => void;
+  onResetProject: () => void;
   onAddAssetToTimeline: (asset: MediaAsset) => void;
   onRemoveAsset: (assetId: string) => void;
 }
@@ -26,6 +28,7 @@ export const MediaBin: React.FC<MediaBinProps> = ({
   onOpenImportPicker,
   onFilesDropped,
   onLoadSamples,
+  onResetProject,
   onAddAssetToTimeline,
   onRemoveAsset,
 }) => {
@@ -104,6 +107,16 @@ export const MediaBin: React.FC<MediaBinProps> = ({
             className="inline-flex items-center justify-center w-9 h-9 rounded-lg bg-[#0E1424] border border-slate-800 text-sky-400 hover:border-slate-700 hover:text-sky-300 transition-colors cursor-pointer disabled:opacity-45 shrink-0"
           >
             <Sparkles className="w-4 h-4" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            disabled={isExporting}
+            onClick={onResetProject}
+            title="Reset saved project"
+            aria-label="Reset saved project"
+            className="inline-flex items-center justify-center w-9 h-9 rounded-lg bg-[#0E1424] border border-slate-800 text-slate-400 hover:border-slate-700 hover:text-rose-300 transition-colors cursor-pointer disabled:opacity-45 shrink-0"
+          >
+            <RotateCcw className="w-4 h-4" aria-hidden="true" />
           </button>
         </div>
 

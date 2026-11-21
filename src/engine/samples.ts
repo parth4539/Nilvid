@@ -164,6 +164,7 @@ export async function filesToMediaAssets(
           height: element.naturalHeight || 720,
           durationSec: 5,
           imageElement: element,
+          sourceBlob: file,
           isSample: false,
         });
       } catch {
@@ -189,6 +190,7 @@ export async function filesToMediaAssets(
           height: meta.height,
           durationSec: meta.durationSec,
           audioBuffer,
+          sourceBlob: file,
           isSample: false,
         });
       } catch {
@@ -209,6 +211,7 @@ export async function filesToMediaAssets(
           durationSec: buffer.duration,
           audioBuffer: buffer,
           waveformPeaks: extractWaveformPeaks(buffer, 64),
+          sourceBlob: file,
           isSample: false,
         });
       } catch {

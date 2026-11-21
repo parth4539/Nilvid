@@ -100,19 +100,50 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
     }
 
     syncTimelineVideos(plan, currentTimeSec, isPlaying);
-    renderFrame(
-      ctx,
-      canvas.width,
-      canvas.height,
-      plan,
-      themeId,
-      currentTimeSec,
-      aspectRatio,
-      colorGrade,
-      particleOverlay,
-      intro,
-      outro
-    );
+
+    const drawCurrent = () => {
+      renderFrame(
+        ctx,
+        canvas.width,
+        canvas.height,
+        plan,
+        themeId,
+        currentTimeSec,
+        aspectRatio,
+        colorGrade,
+        particleOverlay,
+        intro,
+        outro
+      );
+    };
+    drawCurrent();
+
+    const pendingVideos: HTMLVideoElement[] = [];
+    for (const item of plan.schedule) {
+      if (
+        item.clip.kind === 'video' &&
+        item.clip.videoElement &&
+        currentTimeSec >= item.startTime - 0.1 &&
+        currentTimeSec <= item.endTime + 0.1 &&
+        (item.clip.videoElement.readyState < 2 || item.clip.videoElement.seeking)
+      ) {
+        pendingVideos.push(item.clip.videoElement);
+      }
+    }
+
+    if (pendingVideos.length > 0) {
+      const handleReady = () => drawCurrent();
+      pendingVideos.forEach((v) => {
+        v.addEventListener('loadeddata', handleReady);
+        v.addEventListener('seeked', handleReady);
+      });
+      return () => {
+        pendingVideos.forEach((v) => {
+          v.removeEventListener('loadeddata', handleReady);
+          v.removeEventListener('seeked', handleReady);
+        });
+      };
+    }
   }, [
     plan,
     themeId,

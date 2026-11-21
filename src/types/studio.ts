@@ -93,6 +93,7 @@ export interface MediaAsset {
   imageElement?: HTMLImageElement;
   audioBuffer?: AudioBuffer | null;
   waveformPeaks?: number[];
+  sourceBlob?: Blob;
   isSample?: boolean;
 }
 

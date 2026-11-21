@@ -18,6 +18,12 @@ import {
   triggerFileDownload,
 } from './engine/exporter';
 import {
+  clearPersistedProject,
+  loadPersistedProject,
+  savePersistedProject,
+  SaveProjectInput,
+} from './engine/persistence';
+import {
   cloneTimelineClip,
   createAudioClipFromAsset,
   createTimelineClipFromAsset,
@@ -116,6 +122,9 @@ export default function App() {
   const exportResultRef = useRef<ExportResult | null>(null);
   const audioClipsRef = useRef<AudioClip[]>([]);
   const clipsRef = useRef<TimelineClip[]>([]);
+  const isHydratedRef = useRef<boolean>(false);
+  const latestSnapshotRef = useRef<SaveProjectInput | null>(null);
+  const saveTimerRef = useRef<number | null>(null);
 
   // Live preview Web Audio refs
   const previewAudioCtxRef = useRef<AudioContext | null>(null);
@@ -131,11 +140,51 @@ export default function App() {
     [clips, themeId, intro, outro, audioClips]
   );
 
-  // Load initial sample photos so the workspace opens immediately playable
+  // Hydrate persisted project from IndexedDB on load, or initialize sample set
   useEffect(() => {
     let cancelled = false;
-    loadSampleAssets()
-      .then((sampleAssets) => {
+
+    const initWorkspace = async () => {
+      try {
+        const restored = await loadPersistedProject();
+        if (cancelled) {
+          restored?.createdBlobUrls.forEach((u) => URL.revokeObjectURL(u));
+          return;
+        }
+
+        if (
+          restored &&
+          (restored.assets.length > 0 ||
+            restored.clips.length > 0 ||
+            restored.audioClips.length > 0)
+        ) {
+          restored.createdBlobUrls.forEach((u) =>
+            ownedBlobUrlsRef.current.add(u)
+          );
+          setAssets(restored.assets);
+          setClips(restored.clips);
+          setAudioClips(restored.audioClips);
+          setSelection(restored.selection);
+          setActiveTab(restored.activeTab);
+          setThemeId(restored.themeId);
+          setAspectRatio(restored.aspectRatio);
+          setResolution(restored.resolution);
+          setExportFormat(restored.exportFormat);
+          setColorGrade(restored.colorGrade);
+          setParticleOverlay(restored.particleOverlay);
+          setIntro(restored.intro);
+          setOutro(restored.outro);
+          setCurrentTimeSec(restored.currentTimeSec);
+          setIsPlaying(false);
+          isHydratedRef.current = true;
+          return;
+        }
+      } catch {
+        // Fall through to sample initialization
+      }
+
+      try {
+        const sampleAssets = await loadSampleAssets();
         if (cancelled) return;
         const initialClips = sampleAssets.map((a) =>
           createTimelineClipFromAsset(a)
@@ -146,11 +195,98 @@ export default function App() {
           initialClips[0] ? { type: 'clip', id: initialClips[0].id } : null
         );
         setIsPlaying(true);
-      })
-      .catch(() => {});
+      } catch {
+        // ignore
+      } finally {
+        if (!cancelled) {
+          isHydratedRef.current = true;
+        }
+      }
+    };
+
+    initWorkspace();
 
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  // Auto-save project & media blobs to IndexedDB whenever edits occur
+  useEffect(() => {
+    const snapshot: SaveProjectInput = {
+      assets,
+      clips,
+      audioClips,
+      selection,
+      activeTab,
+      themeId,
+      aspectRatio,
+      resolution,
+      exportFormat,
+      colorGrade,
+      particleOverlay,
+      intro,
+      outro,
+      currentTimeSec: currentTimeRef.current,
+    };
+    latestSnapshotRef.current = snapshot;
+
+    if (!isHydratedRef.current) return;
+
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
+      if (latestSnapshotRef.current) {
+        savePersistedProject(latestSnapshotRef.current).catch(() => {});
+      }
+    }, 80);
+  }, [
+    assets,
+    clips,
+    audioClips,
+    selection,
+    activeTab,
+    themeId,
+    aspectRatio,
+    resolution,
+    exportFormat,
+    colorGrade,
+    particleOverlay,
+    intro,
+    outro,
+  ]);
+
+  // Flush pending project save immediately before refresh / tab hide
+  useEffect(() => {
+    const flushSave = () => {
+      if (!isHydratedRef.current || !latestSnapshotRef.current) return;
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      const snapshot: SaveProjectInput = {
+        ...latestSnapshotRef.current,
+        currentTimeSec: currentTimeRef.current,
+      };
+      savePersistedProject(snapshot).catch(() => {});
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushSave();
+      }
+    };
+
+    window.addEventListener('pagehide', flushSave);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('pagehide', flushSave);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
     };
   }, []);
 
@@ -592,6 +728,47 @@ export default function App() {
     setAssets((prev) => prev.filter((a) => a.id !== assetId));
   }, []);
 
+  const handleResetProject = useCallback(async () => {
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    setIsPlaying(false);
+    setCurrentTimeSec(0);
+    setExportStatus('idle');
+    setExportError(null);
+    await clearPersistedProject();
+    ownedBlobUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    ownedBlobUrlsRef.current.clear();
+
+    try {
+      const sampleAssets = await loadSampleAssets();
+      const initialClips = sampleAssets.map((a) =>
+        createTimelineClipFromAsset(a)
+      );
+      setAssets(sampleAssets);
+      setClips(initialClips);
+      setAudioClips([]);
+      setSelection(
+        initialClips[0] ? { type: 'clip', id: initialClips[0].id } : null
+      );
+      setThemeId('cinematic');
+      setAspectRatio('16:9');
+      setResolution('1080p');
+      setExportFormat('mp4');
+      setColorGrade(DEFAULT_COLOR_GRADE);
+      setParticleOverlay('auto');
+      setIntro(DEFAULT_INTRO);
+      setOutro(DEFAULT_OUTRO);
+      setIsPlaying(true);
+    } catch {
+      setAssets([]);
+      setClips([]);
+      setAudioClips([]);
+      setSelection(null);
+    }
+  }, []);
+
   const handleReorderVideoClip = useCallback(
     (fromIndex: number, toIndex: number) => {
       setClips((prev) => {
@@ -1006,6 +1183,7 @@ export default function App() {
             onOpenImportPicker={handleOpenFilePicker}
             onFilesDropped={(files) => handleFilesAdded(files)}
             onLoadSamples={handleLoadSamples}
+            onResetProject={handleResetProject}
             onAddAssetToTimeline={(asset) => handleAddAssetToTimeline(asset)}
             onRemoveAsset={handleRemoveAsset}
           />

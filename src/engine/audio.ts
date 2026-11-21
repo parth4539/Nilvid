@@ -23,8 +23,14 @@ export function extractWaveformPeaks(
 }
 
 export async function decodeAudioBufferFromFile(
-  file: File
+  file: Blob,
+  sharedCtx?: AudioContext
 ): Promise<AudioBuffer> {
+  if (sharedCtx) {
+    const arrayBuffer = await file.arrayBuffer();
+    return await sharedCtx.decodeAudioData(arrayBuffer);
+  }
+
   const AudioCtx =
     window.AudioContext ||
     (window as unknown as { webkitAudioContext: typeof AudioContext })
