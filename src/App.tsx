@@ -6,6 +6,7 @@ import React, {
   useState,
 } from 'react';
 import { ExportPreviewModal } from './components/ExportPreviewModal';
+import { Footer } from './components/Footer';
 import { Header } from './components/Header';
 import { MediaFilmstrip } from './components/MediaFilmstrip';
 import { PreviewStage } from './components/PreviewStage';
@@ -719,6 +720,8 @@ export default function App() {
           }}
         />
       </main>
+
+      <Footer />
 
       <ExportPreviewModal
         result={exportResult}
