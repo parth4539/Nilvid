@@ -7,8 +7,11 @@ import {
   Music,
   Play,
   RotateCcw,
+  Scissors,
   Trash2,
   Upload,
+  Volume2,
+  VolumeX,
   X,
 } from 'lucide-react';
 import {
@@ -22,18 +25,20 @@ import { formatBytes } from '../engine/exporter';
 import { THEME_LIST } from '../engine/themes';
 import {
   AnimationId,
-  AudioTrackConfig,
+  AudioClip,
   CaptionPosition,
+  ClipScheduleItem,
+  ColorFilterId,
   ColorGradeConfig,
   ExportResolution,
   ExportResult,
   ExportStatus,
   InspectorTab,
   ParticleOverlayId,
-  SlideImage,
-  SlideScheduleItem,
+  SelectionTarget,
   TextAnimationId,
   ThemeId,
+  TimelineClip,
   TitleCardConfig,
   TransitionId,
 } from '../types/studio';
@@ -42,40 +47,40 @@ interface StudioControlsProps {
   activeTab: InspectorTab;
   onTabChange: (tab: InspectorTab) => void;
   selectedTheme: ThemeId;
-  durationSec: number;
-  slideCount: number;
-  stepDuration: number;
-  transitionDuration: number;
+  totalDurationSec: number;
+  clipCount: number;
+  audioClipsCount: number;
   resolution: ExportResolution;
-  selectedSlide: SlideImage | null;
-  selectedScheduleItem: SlideScheduleItem | null;
+  selection: SelectionTarget;
+  selectedVideoClip: TimelineClip | null;
+  selectedScheduleItem: ClipScheduleItem | null;
+  selectedAudioClip: AudioClip | null;
+  currentTimeSec: number;
   colorGrade: ColorGradeConfig;
   particleOverlay: ParticleOverlayId;
   intro: TitleCardConfig;
   outro: TitleCardConfig;
-  audioTrack: AudioTrackConfig | null;
-  audioLoading: boolean;
-  audioError: string | null;
   exportStatus: ExportStatus;
   exportProgressPct: number;
   exportElapsedSec: number;
   exportError: string | null;
   exportResult: ExportResult | null;
   onSelectTheme: (theme: ThemeId) => void;
-  onDurationChange: (seconds: number) => void;
+  onFitTotalDuration: (targetSeconds: number) => void;
   onResolutionChange: (res: ExportResolution) => void;
-  onUpdateSlide: (slideId: string, patch: Partial<SlideImage>) => void;
+  onUpdateVideoClip: (clipId: string, patch: Partial<TimelineClip>) => void;
+  onUpdateAudioClip: (audioClipId: string, patch: Partial<AudioClip>) => void;
+  onDeleteAudioClip: (audioClipId: string) => void;
+  onSplitAtPlayhead: () => void;
   onApplyAnimationToAll: (anim: AnimationId) => void;
   onApplyTransitionToAll: (trans: TransitionId) => void;
-  onResetAllSlideOverrides: () => void;
+  onResetAllClipOverrides: () => void;
   onUpdateColorGrade: (patch: Partial<ColorGradeConfig>) => void;
   onResetColorGrade: () => void;
   onSelectParticleOverlay: (id: ParticleOverlayId) => void;
   onUpdateIntro: (patch: Partial<TitleCardConfig>) => void;
   onUpdateOutro: (patch: Partial<TitleCardConfig>) => void;
-  onUploadAudio: (file: File) => void;
-  onUpdateAudio: (patch: Partial<AudioTrackConfig>) => void;
-  onRemoveAudio: () => void;
+  onUploadAudioFile: (file: File) => void;
   onStartExport: () => void;
   onCancelExport: () => void;
   onDownloadResult: () => void;
@@ -83,6 +88,7 @@ interface StudioControlsProps {
 }
 
 const DURATION_PRESETS = [10, 15, 30, 45, 60];
+const VIDEO_SPEED_PRESETS = [0.5, 1, 1.5, 2];
 
 const CAPTION_POSITIONS: { id: CaptionPosition; label: string }[] = [
   { id: 'bottom-center', label: 'Bottom Center' },
@@ -140,40 +146,40 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
   activeTab,
   onTabChange,
   selectedTheme,
-  durationSec,
-  slideCount,
-  stepDuration,
-  transitionDuration,
+  totalDurationSec,
+  clipCount,
+  audioClipsCount,
   resolution,
-  selectedSlide,
+  selection,
+  selectedVideoClip,
   selectedScheduleItem,
+  selectedAudioClip,
+  currentTimeSec,
   colorGrade,
   particleOverlay,
   intro,
   outro,
-  audioTrack,
-  audioLoading,
-  audioError,
   exportStatus,
   exportProgressPct,
   exportElapsedSec,
   exportError,
   exportResult,
   onSelectTheme,
-  onDurationChange,
+  onFitTotalDuration,
   onResolutionChange,
-  onUpdateSlide,
+  onUpdateVideoClip,
+  onUpdateAudioClip,
+  onDeleteAudioClip,
+  onSplitAtPlayhead,
   onApplyAnimationToAll,
   onApplyTransitionToAll,
-  onResetAllSlideOverrides,
+  onResetAllClipOverrides,
   onUpdateColorGrade,
   onResetColorGrade,
   onSelectParticleOverlay,
   onUpdateIntro,
   onUpdateOutro,
-  onUploadAudio,
-  onUpdateAudio,
-  onRemoveAudio,
+  onUploadAudioFile,
   onStartExport,
   onCancelExport,
   onDownloadResult,
@@ -181,6 +187,9 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
 }) => {
   const isExporting = exportStatus === 'rendering';
   const [animCategory, setAnimCategory] = useState<string>('All');
+  const [fitLengthSlider, setFitLengthSlider] = useState<number>(
+    Math.min(60, Math.max(10, Math.round(totalDurationSec)))
+  );
   const audioInputRef = useRef<HTMLInputElement | null>(null);
 
   const filteredAnimations =
@@ -189,9 +198,21 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
       : ANIMATION_CATALOG.filter((a) => a.category === animCategory);
 
   const activeAnimationId =
-    selectedSlide?.animationOverride ?? selectedScheduleItem?.animationId;
+    selectedVideoClip?.animationOverride ?? selectedScheduleItem?.animationId;
   const activeTransitionId =
-    selectedSlide?.transitionOverride ?? selectedScheduleItem?.transitionOutType;
+    selectedVideoClip?.transitionOverride ?? selectedScheduleItem?.transitionOutType;
+
+  const canSplitClip =
+    selection?.type === 'clip' &&
+    selectedScheduleItem &&
+    currentTimeSec > selectedScheduleItem.startTime + 0.25 &&
+    currentTimeSec < selectedScheduleItem.endTime - 0.25;
+
+  const canSplitAudio =
+    selection?.type === 'audio' &&
+    selectedAudioClip &&
+    currentTimeSec > selectedAudioClip.startTime + 0.25 &&
+    currentTimeSec < selectedAudioClip.startTime + selectedAudioClip.durationSec - 0.25;
 
   return (
     <aside
@@ -207,10 +228,10 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
       >
         {(
           [
+            { id: 'clip', label: 'Clip' },
             { id: 'theme', label: 'Theme' },
-            { id: 'clip', label: 'Motion' },
             { id: 'look', label: 'Look & FX' },
-            { id: 'titles', label: 'Audio & Text' },
+            { id: 'titles', label: 'Titles' },
           ] as { id: InspectorTab; label: string }[]
         ).map((tab) => {
           const active = activeTab === tab.id;
@@ -234,10 +255,618 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
       </div>
 
       {/* Scrollable Inspector Body */}
-      <div className="p-5 space-y-5 max-h-[540px] overflow-y-auto">
+      <div className="p-4 sm:p-5 space-y-5 max-h-[540px] overflow-y-auto">
+        {activeTab === 'clip' && (
+          <div className="space-y-4">
+            {selection?.type === 'audio' && selectedAudioClip ? (
+              <>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <h2 className="font-display text-sm font-semibold text-slate-100 truncate flex items-center gap-1.5">
+                      <Music className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                      <span className="truncate">{selectedAudioClip.name}</span>
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Song Clip · Source {selectedAudioClip.sourceDurationSec.toFixed(1)}s
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={isExporting}
+                    onClick={() => onDeleteAudioClip(selectedAudioClip.id)}
+                    aria-label="Delete selected song clip"
+                    className="w-8 h-8 rounded-lg bg-[#090E1B] border border-slate-800 text-slate-400 hover:text-rose-400 flex items-center justify-center cursor-pointer shrink-0"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={!canSplitAudio || isExporting}
+                  onClick={onSplitAtPlayhead}
+                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[36px] rounded-lg bg-[#172554] border border-sky-500/30 text-sky-100 text-xs font-medium hover:bg-[#2563EB] disabled:opacity-40 disabled:pointer-events-none transition-colors cursor-pointer"
+                >
+                  <Scissors className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>Split Song at Playhead</span>
+                </button>
+
+                <div className="space-y-3">
+                  <div>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-slate-400">Timeline Start</span>
+                      <span className="font-mono text-sky-300">
+                        {selectedAudioClip.startTime.toFixed(1)}s
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={Math.max(30, Math.ceil(totalDurationSec))}
+                      step={0.5}
+                      disabled={isExporting}
+                      value={selectedAudioClip.startTime}
+                      onChange={(e) =>
+                        onUpdateAudioClip(selectedAudioClip.id, {
+                          startTime: Number(e.target.value),
+                        })
+                      }
+                      className="studio-slider w-full"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-slate-400">Clip Duration</span>
+                      <span className="font-mono text-sky-300">
+                        {selectedAudioClip.durationSec.toFixed(1)}s
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={Math.max(10, Math.ceil(selectedAudioClip.sourceDurationSec))}
+                      step={0.5}
+                      disabled={isExporting}
+                      value={selectedAudioClip.durationSec}
+                      onChange={(e) =>
+                        onUpdateAudioClip(selectedAudioClip.id, {
+                          durationSec: Number(e.target.value),
+                        })
+                      }
+                      className="studio-slider w-full"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-slate-400">Song Start Offset</span>
+                      <span className="font-mono text-slate-200">
+                        {selectedAudioClip.sourceOffsetSec.toFixed(1)}s
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={Math.max(0, selectedAudioClip.sourceDurationSec - 1)}
+                      step={0.5}
+                      disabled={isExporting}
+                      value={selectedAudioClip.sourceOffsetSec}
+                      onChange={(e) =>
+                        onUpdateAudioClip(selectedAudioClip.id, {
+                          sourceOffsetSec: Number(e.target.value),
+                        })
+                      }
+                      className="studio-slider w-full"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-slate-400">Volume</span>
+                      <span className="font-mono text-slate-200">
+                        {Math.round(selectedAudioClip.volume * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      disabled={isExporting}
+                      value={Math.round(selectedAudioClip.volume * 100)}
+                      onChange={(e) =>
+                        onUpdateAudioClip(selectedAudioClip.id, {
+                          volume: Number(e.target.value) / 100,
+                        })
+                      }
+                      className="studio-slider w-full"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div>
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-slate-400">Fade In</span>
+                        <span className="font-mono text-slate-200">
+                          {selectedAudioClip.fadeInSec.toFixed(1)}s
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={5}
+                        step={0.5}
+                        disabled={isExporting}
+                        value={selectedAudioClip.fadeInSec}
+                        onChange={(e) =>
+                          onUpdateAudioClip(selectedAudioClip.id, {
+                            fadeInSec: Number(e.target.value),
+                          })
+                        }
+                        className="studio-slider w-full"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-slate-400">Fade Out</span>
+                        <span className="font-mono text-slate-200">
+                          {selectedAudioClip.fadeOutSec.toFixed(1)}s
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={5}
+                        step={0.5}
+                        disabled={isExporting}
+                        value={selectedAudioClip.fadeOutSec}
+                        onChange={(e) =>
+                          onUpdateAudioClip(selectedAudioClip.id, {
+                            fadeOutSec: Number(e.target.value),
+                          })
+                        }
+                        className="studio-slider w-full"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </>
+            ) : selectedVideoClip ? (
+              <>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <h2 className="font-display text-sm font-semibold text-slate-100 truncate">
+                      {selectedScheduleItem ? `${selectedScheduleItem.index + 1}. ` : ''}
+                      {selectedVideoClip.name}
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      {selectedVideoClip.kind === 'video' ? 'Video Cut' : 'Photo Slide'} ·{' '}
+                      {selectedVideoClip.durationSec.toFixed(1)}s
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={isExporting}
+                    onClick={onResetAllClipOverrides}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#090E1B] border border-slate-800 text-[11px] text-slate-300 hover:text-white cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <RotateCcw className="w-3 h-3" aria-hidden="true" />
+                    <span>Auto All</span>
+                  </button>
+                </div>
+
+                {/* Split & Trim Controls */}
+                <div className="p-3 rounded-xl bg-[#090E1B] border border-slate-800 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-200">
+                      Timing & Speed
+                    </span>
+                    <button
+                      type="button"
+                      disabled={!canSplitClip || isExporting}
+                      onClick={onSplitAtPlayhead}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-[#172554] text-sky-100 text-[11px] font-medium hover:bg-[#2563EB] disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
+                    >
+                      <Scissors className="w-3 h-3" aria-hidden="true" />
+                      <span>Split Here</span>
+                    </button>
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-slate-400">Clip Duration</span>
+                      <span className="font-mono text-sky-300">
+                        {selectedVideoClip.durationSec.toFixed(1)}s
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={
+                        selectedVideoClip.kind === 'video'
+                          ? Math.max(
+                              1,
+                              Number(
+                                (
+                                  (selectedVideoClip.sourceDurationSec -
+                                    selectedVideoClip.sourceStartSec) /
+                                  selectedVideoClip.speed
+                                ).toFixed(1)
+                              )
+                            )
+                          : 20
+                      }
+                      step={0.5}
+                      disabled={isExporting}
+                      value={selectedVideoClip.durationSec}
+                      onChange={(e) =>
+                        onUpdateVideoClip(selectedVideoClip.id, {
+                          durationSec: Number(e.target.value),
+                        })
+                      }
+                      className="studio-slider w-full"
+                    />
+                  </div>
+
+                  {selectedVideoClip.kind === 'video' && (
+                    <>
+                      <div>
+                        <div className="flex justify-between text-xs mb-1">
+                          <span className="text-slate-400">Trim In-Point</span>
+                          <span className="font-mono text-slate-200">
+                            {selectedVideoClip.sourceStartSec.toFixed(1)}s
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={Math.max(0, selectedVideoClip.sourceDurationSec - 0.5)}
+                          step={0.2}
+                          disabled={isExporting}
+                          value={selectedVideoClip.sourceStartSec}
+                          onChange={(e) => {
+                            const newStart = Number(e.target.value);
+                            const maxDur = Math.max(
+                              0.5,
+                              (selectedVideoClip.sourceDurationSec - newStart) /
+                                selectedVideoClip.speed
+                            );
+                            onUpdateVideoClip(selectedVideoClip.id, {
+                              sourceStartSec: newStart,
+                              durationSec: Math.min(selectedVideoClip.durationSec, maxDur),
+                            });
+                          }}
+                          className="studio-slider w-full"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-xs mb-1">
+                          <span className="text-slate-400">Playback Speed</span>
+                          <span className="font-mono text-sky-300">
+                            {selectedVideoClip.speed.toFixed(2).replace(/\.00$/, '')}x
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0.25}
+                          max={4}
+                          step={0.25}
+                          disabled={isExporting}
+                          value={selectedVideoClip.speed}
+                          onChange={(e) => {
+                            const nextSpeed = Number(e.target.value);
+                            const maxDur = Math.max(
+                              0.5,
+                              (selectedVideoClip.sourceDurationSec -
+                                selectedVideoClip.sourceStartSec) /
+                                nextSpeed
+                            );
+                            onUpdateVideoClip(selectedVideoClip.id, {
+                              speed: nextSpeed,
+                              durationSec: Math.min(selectedVideoClip.durationSec, maxDur),
+                            });
+                          }}
+                          className="studio-slider w-full"
+                        />
+                        <div className="grid grid-cols-4 gap-1.5 mt-2">
+                          {VIDEO_SPEED_PRESETS.map((spd) => (
+                            <button
+                              key={spd}
+                              type="button"
+                              disabled={isExporting}
+                              onClick={() => {
+                                const maxDur = Math.max(
+                                  0.5,
+                                  (selectedVideoClip.sourceDurationSec -
+                                    selectedVideoClip.sourceStartSec) /
+                                    spd
+                                );
+                                onUpdateVideoClip(selectedVideoClip.id, {
+                                  speed: spd,
+                                  durationSec: Math.min(selectedVideoClip.durationSec, maxDur),
+                                });
+                              }}
+                              className={`py-1 rounded text-[11px] font-mono border cursor-pointer ${
+                                selectedVideoClip.speed === spd
+                                  ? 'bg-[#172554] border-sky-500/40 text-sky-100'
+                                  : 'bg-[#0E1424] border-slate-800 text-slate-400'
+                              }`}
+                            >
+                              {spd}x
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 pt-1">
+                        <button
+                          type="button"
+                          disabled={isExporting}
+                          onClick={() =>
+                            onUpdateVideoClip(selectedVideoClip.id, {
+                              muted: !selectedVideoClip.muted,
+                            })
+                          }
+                          aria-label={selectedVideoClip.muted ? 'Unmute video audio' : 'Mute video audio'}
+                          className="w-8 h-8 rounded-lg bg-[#0E1424] border border-slate-800 text-slate-300 flex items-center justify-center cursor-pointer shrink-0"
+                        >
+                          {selectedVideoClip.muted ? (
+                            <VolumeX className="w-4 h-4 text-rose-400" />
+                          ) : (
+                            <Volume2 className="w-4 h-4 text-sky-400" />
+                          )}
+                        </button>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          disabled={isExporting || selectedVideoClip.muted}
+                          value={Math.round(selectedVideoClip.volume * 100)}
+                          onChange={(e) =>
+                            onUpdateVideoClip(selectedVideoClip.id, {
+                              volume: Number(e.target.value) / 100,
+                            })
+                          }
+                          className="studio-slider flex-1 disabled:opacity-40"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {/* Individual Animation Styling Speed */}
+                  <div>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-slate-400">Animation Speed</span>
+                      <span className="font-mono text-sky-300">
+                        {selectedVideoClip.motionSpeed.toFixed(1)}x
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={2.5}
+                      step={0.25}
+                      disabled={isExporting}
+                      value={selectedVideoClip.motionSpeed}
+                      onChange={(e) =>
+                        onUpdateVideoClip(selectedVideoClip.id, {
+                          motionSpeed: Number(e.target.value),
+                        })
+                      }
+                      className="studio-slider w-full"
+                    />
+                  </div>
+                </div>
+
+                {/* 18 Frame Animations */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-200">
+                      Motion Preset (18)
+                    </span>
+                    {activeAnimationId && (
+                      <button
+                        type="button"
+                        disabled={isExporting}
+                        onClick={() => onApplyAnimationToAll(activeAnimationId)}
+                        className="text-[11px] text-[#38BDF8] hover:underline cursor-pointer whitespace-nowrap"
+                      >
+                        Apply to all
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-1 overflow-x-auto pb-1">
+                    {ANIM_CATEGORIES.map((cat) => (
+                      <button
+                        key={cat}
+                        type="button"
+                        onClick={() => setAnimCategory(cat)}
+                        className={`px-2 py-1 rounded-md text-[11px] font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                          animCategory === cat
+                            ? 'bg-[#172554] text-sky-100'
+                            : 'bg-[#090E1B] text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        {cat}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-1.5 max-h-[150px] overflow-y-auto pr-1">
+                    {filteredAnimations.map((anim) => {
+                      const active =
+                        selectedVideoClip.kind === 'video'
+                          ? selectedVideoClip.animationOverride === anim.id
+                          : activeAnimationId === anim.id;
+                      return (
+                        <button
+                          key={anim.id}
+                          type="button"
+                          disabled={isExporting}
+                          title={anim.description}
+                          onClick={() =>
+                            onUpdateVideoClip(selectedVideoClip.id, {
+                              animationOverride: anim.id,
+                            })
+                          }
+                          className={`text-left px-2.5 py-1.5 rounded-lg border text-xs transition-colors cursor-pointer disabled:opacity-50 ${
+                            active
+                              ? 'bg-[#131F3A] border-[#38BDF8] text-slate-100'
+                              : 'bg-[#090E1B] border-slate-800/80 text-slate-300 hover:border-slate-700'
+                          }`}
+                        >
+                          <div className="font-medium truncate">{anim.label}</div>
+                          <div className="text-[10px] text-slate-500 truncate">
+                            {anim.category}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 19 Transitions */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="slide-transition-select"
+                      className="text-xs font-semibold text-slate-200"
+                    >
+                      Outgoing Transition (19)
+                    </label>
+                    {activeTransitionId && (
+                      <button
+                        type="button"
+                        disabled={isExporting}
+                        onClick={() => onApplyTransitionToAll(activeTransitionId)}
+                        className="text-[11px] text-[#38BDF8] hover:underline cursor-pointer whitespace-nowrap"
+                      >
+                        Apply to all
+                      </button>
+                    )}
+                  </div>
+                  <select
+                    id="slide-transition-select"
+                    disabled={isExporting}
+                    value={activeTransitionId ?? 'crossfade'}
+                    onChange={(e) =>
+                      onUpdateVideoClip(selectedVideoClip.id, {
+                        transitionOverride: e.target.value as TransitionId,
+                      })
+                    }
+                    className="w-full px-3 py-2 min-h-[38px] rounded-lg bg-[#090E1B] border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-[#38BDF8]"
+                  >
+                    {TRANSITION_CATALOG.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.label} ({t.category})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Individual Clip Color Filter Override */}
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="clip-filter-select"
+                    className="text-xs font-semibold text-slate-200 block"
+                  >
+                    Individual Clip Color Style
+                  </label>
+                  <select
+                    id="clip-filter-select"
+                    disabled={isExporting}
+                    value={selectedVideoClip.filterOverride ?? 'auto'}
+                    onChange={(e) =>
+                      onUpdateVideoClip(selectedVideoClip.id, {
+                        filterOverride: e.target.value as ColorFilterId,
+                      })
+                    }
+                    className="w-full px-3 py-2 min-h-[38px] rounded-lg bg-[#090E1B] border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-[#38BDF8]"
+                  >
+                    <option value="auto">Inherit Global Look</option>
+                    {COLOR_FILTERS.filter((f) => f.id !== 'auto').map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Animated Caption */}
+                <div className="space-y-2">
+                  <label
+                    htmlFor="slide-caption-input"
+                    className="text-xs font-semibold text-slate-200 block"
+                  >
+                    Clip Animated Caption
+                  </label>
+                  <input
+                    id="slide-caption-input"
+                    type="text"
+                    disabled={isExporting}
+                    placeholder="Add caption overlay..."
+                    value={selectedVideoClip.caption ?? ''}
+                    onChange={(e) =>
+                      onUpdateVideoClip(selectedVideoClip.id, {
+                        caption: e.target.value,
+                      })
+                    }
+                    className="w-full px-3 py-2 min-h-[38px] rounded-lg bg-[#090E1B] border border-slate-800 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-[#38BDF8]"
+                  />
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <select
+                      aria-label="Caption position"
+                      disabled={isExporting}
+                      value={selectedVideoClip.captionPosition ?? 'bottom-center'}
+                      onChange={(e) =>
+                        onUpdateVideoClip(selectedVideoClip.id, {
+                          captionPosition: e.target.value as CaptionPosition,
+                        })
+                      }
+                      className="px-2.5 py-2 min-h-[34px] rounded-lg bg-[#090E1B] border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-[#38BDF8]"
+                    >
+                      {CAPTION_POSITIONS.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.label}
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
+                      aria-label="Caption animation"
+                      disabled={isExporting}
+                      value={selectedVideoClip.captionAnimation ?? 'fade-rise'}
+                      onChange={(e) =>
+                        onUpdateVideoClip(selectedVideoClip.id, {
+                          captionAnimation: e.target.value as TextAnimationId,
+                        })
+                      }
+                      className="px-2.5 py-2 min-h-[34px] rounded-lg bg-[#090E1B] border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-[#38BDF8]"
+                    >
+                      {TEXT_ANIMATIONS.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <p className="text-xs text-slate-400 py-8 text-center">
+                Select any image, video cut, or song clip on the Timeline below
+                to adjust speed, trim, styling, or captions.
+              </p>
+            )}
+          </div>
+        )}
+
         {activeTab === 'theme' && (
           <>
-            {/* Theme Selector */}
             <div className="space-y-3">
               <div className="flex items-baseline justify-between gap-2">
                 <h2 className="font-display text-sm font-semibold text-slate-100">
@@ -280,17 +909,16 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
 
             <div className="h-px bg-slate-800/80" />
 
-            {/* Video Length */}
             <div className="space-y-3">
               <div className="flex items-baseline justify-between gap-2">
                 <label
                   htmlFor="video-length-slider"
                   className="font-display text-sm font-semibold text-slate-100"
                 >
-                  Video Length
+                  Fit Sequence Length (10–60s)
                 </label>
                 <span className="font-mono text-sm font-medium text-[#38BDF8]">
-                  {durationSec}s
+                  {fitLengthSlider}s
                 </span>
               </div>
 
@@ -300,9 +928,13 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
                 min={10}
                 max={60}
                 step={1}
-                disabled={isExporting}
-                value={durationSec}
-                onChange={(e) => onDurationChange(Number(e.target.value))}
+                disabled={isExporting || clipCount === 0}
+                value={fitLengthSlider}
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  setFitLengthSlider(val);
+                  onFitTotalDuration(val);
+                }}
                 className="studio-slider w-full disabled:opacity-50"
               />
 
@@ -311,259 +943,41 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
                 aria-label="Quick duration presets"
                 className="grid grid-cols-5 gap-1.5"
               >
-                {DURATION_PRESETS.map((preset) => {
-                  const active = durationSec === preset;
-                  return (
-                    <button
-                      key={preset}
-                      type="button"
-                      disabled={isExporting}
-                      onClick={() => onDurationChange(preset)}
-                      className={`py-1.5 min-h-[34px] rounded-lg font-mono text-xs font-medium border transition-colors cursor-pointer disabled:opacity-50 whitespace-nowrap ${
-                        active
-                          ? 'bg-[#172554] border-sky-500/40 text-sky-100'
-                          : 'bg-[#090E1B] border-slate-800/80 text-slate-400 hover:text-slate-200 hover:border-slate-700'
-                      }`}
-                    >
-                      {preset}s
-                    </button>
-                  );
-                })}
+                {DURATION_PRESETS.map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    disabled={isExporting || clipCount === 0}
+                    onClick={() => {
+                      setFitLengthSlider(preset);
+                      onFitTotalDuration(preset);
+                    }}
+                    className={`py-1.5 min-h-[34px] rounded-lg font-mono text-xs font-medium border transition-colors cursor-pointer disabled:opacity-50 whitespace-nowrap ${
+                      Math.round(totalDurationSec) === preset
+                        ? 'bg-[#172554] border-sky-500/40 text-sky-100'
+                        : 'bg-[#090E1B] border-slate-800/80 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                    }`}
+                  >
+                    {preset}s
+                  </button>
+                ))}
               </div>
 
               <p className="text-xs text-slate-400 font-mono">
-                {slideCount > 0 ? (
-                  <>
-                    {slideCount} {slideCount === 1 ? 'image' : 'images'}
-                    <span aria-hidden="true"> · </span>
-                    {(stepDuration + transitionDuration).toFixed(1)}s per slide
-                    {slideCount > 1 && (
-                      <>
-                        <span aria-hidden="true"> · </span>
-                        {transitionDuration.toFixed(1)}s transition
-                      </>
-                    )}
-                  </>
-                ) : (
-                  'Upload images to calculate slide pacing'
-                )}
+                {clipCount} clips · {audioClipsCount} song{' '}
+                {audioClipsCount === 1 ? 'clip' : 'clips'} · Total{' '}
+                {totalDurationSec.toFixed(1)}s
               </p>
             </div>
           </>
         )}
 
-        {activeTab === 'clip' && (
-          <div className="space-y-5">
-            {selectedSlide ? (
-              <>
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <h2 className="font-display text-sm font-semibold text-slate-100 truncate">
-                      Slide {selectedScheduleItem ? selectedScheduleItem.index + 1 : 1}:{' '}
-                      {selectedSlide.name}
-                    </h2>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      Customize motion, transition & animated caption
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={isExporting}
-                    onClick={onResetAllSlideOverrides}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#090E1B] border border-slate-800 text-[11px] text-slate-300 hover:text-white cursor-pointer whitespace-nowrap shrink-0"
-                  >
-                    <RotateCcw className="w-3 h-3" aria-hidden="true" />
-                    <span>Auto All</span>
-                  </button>
-                </div>
-
-                {/* 18 Image Animations */}
-                <div className="space-y-2.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-semibold text-slate-200">
-                      Image Animation (18)
-                    </span>
-                    {activeAnimationId && (
-                      <button
-                        type="button"
-                        disabled={isExporting}
-                        onClick={() => onApplyAnimationToAll(activeAnimationId)}
-                        className="text-[11px] text-[#38BDF8] hover:underline cursor-pointer whitespace-nowrap"
-                      >
-                        Apply to all
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Category Filter */}
-                  <div className="flex items-center gap-1 overflow-x-auto pb-1">
-                    {ANIM_CATEGORIES.map((cat) => (
-                      <button
-                        key={cat}
-                        type="button"
-                        onClick={() => setAnimCategory(cat)}
-                        className={`px-2.5 py-1 rounded-md text-[11px] font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
-                          animCategory === cat
-                            ? 'bg-[#172554] text-sky-100'
-                            : 'bg-[#090E1B] text-slate-400 hover:text-slate-200'
-                        }`}
-                      >
-                        {cat}
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-1.5 max-h-[180px] overflow-y-auto pr-1">
-                    {filteredAnimations.map((anim) => {
-                      const active = activeAnimationId === anim.id;
-                      return (
-                        <button
-                          key={anim.id}
-                          type="button"
-                          disabled={isExporting}
-                          title={anim.description}
-                          onClick={() =>
-                            onUpdateSlide(selectedSlide.id, {
-                              animationOverride: anim.id,
-                            })
-                          }
-                          className={`text-left px-2.5 py-2 rounded-lg border text-xs transition-colors cursor-pointer disabled:opacity-50 ${
-                            active
-                              ? 'bg-[#131F3A] border-[#38BDF8] text-slate-100'
-                              : 'bg-[#090E1B] border-slate-800/80 text-slate-300 hover:border-slate-700'
-                          }`}
-                        >
-                          <div className="font-medium truncate">{anim.label}</div>
-                          <div className="text-[10px] text-slate-500 truncate">
-                            {anim.category}
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="h-px bg-slate-800/80" />
-
-                {/* 19 Transitions */}
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <label
-                      htmlFor="slide-transition-select"
-                      className="text-xs font-semibold text-slate-200"
-                    >
-                      Outgoing Transition (19)
-                    </label>
-                    {activeTransitionId && (
-                      <button
-                        type="button"
-                        disabled={isExporting}
-                        onClick={() => onApplyTransitionToAll(activeTransitionId)}
-                        className="text-[11px] text-[#38BDF8] hover:underline cursor-pointer whitespace-nowrap"
-                      >
-                        Apply to all
-                      </button>
-                    )}
-                  </div>
-
-                  <select
-                    id="slide-transition-select"
-                    disabled={isExporting}
-                    value={activeTransitionId ?? 'crossfade'}
-                    onChange={(e) =>
-                      onUpdateSlide(selectedSlide.id, {
-                        transitionOverride: e.target.value as TransitionId,
-                      })
-                    }
-                    className="w-full px-3 py-2 min-h-[40px] rounded-lg bg-[#090E1B] border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-[#38BDF8]"
-                  >
-                    {TRANSITION_CATALOG.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.label} ({t.category}) — {t.description}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="h-px bg-slate-800/80" />
-
-                {/* Slide Animated Caption */}
-                <div className="space-y-2.5">
-                  <label
-                    htmlFor="slide-caption-input"
-                    className="text-xs font-semibold text-slate-200 block"
-                  >
-                    Slide Animated Caption
-                  </label>
-                  <input
-                    id="slide-caption-input"
-                    type="text"
-                    disabled={isExporting}
-                    placeholder="Add caption overlay for this photo..."
-                    value={selectedSlide.caption ?? ''}
-                    onChange={(e) =>
-                      onUpdateSlide(selectedSlide.id, {
-                        caption: e.target.value,
-                      })
-                    }
-                    className="w-full px-3 py-2 min-h-[38px] rounded-lg bg-[#090E1B] border border-slate-800 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-[#38BDF8]"
-                  />
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <select
-                      aria-label="Caption position"
-                      disabled={isExporting}
-                      value={selectedSlide.captionPosition ?? 'bottom-center'}
-                      onChange={(e) =>
-                        onUpdateSlide(selectedSlide.id, {
-                          captionPosition: e.target.value as CaptionPosition,
-                        })
-                      }
-                      className="px-2.5 py-2 min-h-[36px] rounded-lg bg-[#090E1B] border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-[#38BDF8]"
-                    >
-                      {CAPTION_POSITIONS.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.label}
-                        </option>
-                      ))}
-                    </select>
-
-                    <select
-                      aria-label="Caption animation"
-                      disabled={isExporting}
-                      value={selectedSlide.captionAnimation ?? 'fade-rise'}
-                      onChange={(e) =>
-                        onUpdateSlide(selectedSlide.id, {
-                          captionAnimation: e.target.value as TextAnimationId,
-                        })
-                      }
-                      className="px-2.5 py-2 min-h-[36px] rounded-lg bg-[#090E1B] border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-[#38BDF8]"
-                    >
-                      {TEXT_ANIMATIONS.map((a) => (
-                        <option key={a.id} value={a.id}>
-                          {a.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-              </>
-            ) : (
-              <p className="text-xs text-slate-400 py-8 text-center">
-                Upload or select an image in the Sequence Filmstrip to customize
-                its animation, transition, and caption.
-              </p>
-            )}
-          </div>
-        )}
-
         {activeTab === 'look' && (
           <div className="space-y-5">
-            {/* Color Filters */}
             <div className="space-y-2.5">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="font-display text-sm font-semibold text-slate-100">
-                  Color Filter
+                  Global Color Filter
                 </h2>
                 <button
                   type="button"
@@ -599,103 +1013,99 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
 
             <div className="h-px bg-slate-800/80" />
 
-            {/* Fine Color Adjustments */}
-            <div className="space-y-3">
+            <div className="space-y-2.5">
               <h3 className="text-xs font-semibold text-slate-200">
                 Color Adjustments
               </h3>
 
-              <div className="space-y-2.5">
-                <div>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-slate-400">Brightness</span>
-                    <span className="font-mono text-slate-200">
-                      {colorGrade.brightness}%
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={70}
-                    max={130}
-                    value={colorGrade.brightness}
-                    disabled={isExporting}
-                    onChange={(e) =>
-                      onUpdateColorGrade({ brightness: Number(e.target.value) })
-                    }
-                    className="studio-slider w-full"
-                  />
+              <div>
+                <div className="flex justify-between text-xs mb-1">
+                  <span className="text-slate-400">Brightness</span>
+                  <span className="font-mono text-slate-200">
+                    {colorGrade.brightness}%
+                  </span>
                 </div>
+                <input
+                  type="range"
+                  min={70}
+                  max={130}
+                  value={colorGrade.brightness}
+                  disabled={isExporting}
+                  onChange={(e) =>
+                    onUpdateColorGrade({ brightness: Number(e.target.value) })
+                  }
+                  className="studio-slider w-full"
+                />
+              </div>
 
-                <div>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-slate-400">Contrast</span>
-                    <span className="font-mono text-slate-200">
-                      {colorGrade.contrast}%
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={70}
-                    max={140}
-                    value={colorGrade.contrast}
-                    disabled={isExporting}
-                    onChange={(e) =>
-                      onUpdateColorGrade({ contrast: Number(e.target.value) })
-                    }
-                    className="studio-slider w-full"
-                  />
+              <div>
+                <div className="flex justify-between text-xs mb-1">
+                  <span className="text-slate-400">Contrast</span>
+                  <span className="font-mono text-slate-200">
+                    {colorGrade.contrast}%
+                  </span>
                 </div>
+                <input
+                  type="range"
+                  min={70}
+                  max={140}
+                  value={colorGrade.contrast}
+                  disabled={isExporting}
+                  onChange={(e) =>
+                    onUpdateColorGrade({ contrast: Number(e.target.value) })
+                  }
+                  className="studio-slider w-full"
+                />
+              </div>
 
-                <div>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-slate-400">Saturation</span>
-                    <span className="font-mono text-slate-200">
-                      {colorGrade.saturation}%
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={160}
-                    value={colorGrade.saturation}
-                    disabled={isExporting}
-                    onChange={(e) =>
-                      onUpdateColorGrade({ saturation: Number(e.target.value) })
-                    }
-                    className="studio-slider w-full"
-                  />
+              <div>
+                <div className="flex justify-between text-xs mb-1">
+                  <span className="text-slate-400">Saturation</span>
+                  <span className="font-mono text-slate-200">
+                    {colorGrade.saturation}%
+                  </span>
                 </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={160}
+                  value={colorGrade.saturation}
+                  disabled={isExporting}
+                  onChange={(e) =>
+                    onUpdateColorGrade({ saturation: Number(e.target.value) })
+                  }
+                  className="studio-slider w-full"
+                />
+              </div>
 
-                <div>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-slate-400">Vignette</span>
-                    <span className="font-mono text-slate-200">
-                      {colorGrade.useThemeVignette
-                        ? 'Theme Auto'
-                        : `${colorGrade.vignette}%`}
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={85}
-                    value={colorGrade.vignette}
-                    disabled={isExporting}
-                    onChange={(e) =>
-                      onUpdateColorGrade({
-                        vignette: Number(e.target.value),
-                        useThemeVignette: false,
-                      })
-                    }
-                    className="studio-slider w-full"
-                  />
+              <div>
+                <div className="flex justify-between text-xs mb-1">
+                  <span className="text-slate-400">Vignette</span>
+                  <span className="font-mono text-slate-200">
+                    {colorGrade.useThemeVignette
+                      ? 'Theme Auto'
+                      : `${colorGrade.vignette}%`}
+                  </span>
                 </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={85}
+                  value={colorGrade.vignette}
+                  disabled={isExporting}
+                  onChange={(e) =>
+                    onUpdateColorGrade({
+                      vignette: Number(e.target.value),
+                      useThemeVignette: false,
+                    })
+                  }
+                  className="studio-slider w-full"
+                />
               </div>
             </div>
 
             <div className="h-px bg-slate-800/80" />
 
-            {/* Particle Overlays */}
             <div className="space-y-2.5">
               <h2 className="font-display text-sm font-semibold text-slate-100">
                 Particle Overlays
@@ -893,13 +1303,15 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
 
             <div className="h-px bg-slate-800/80" />
 
-            {/* Background Music Upload with Fade */}
-            <div className="space-y-3">
+            {/* Quick Add Song Clip */}
+            <div className="space-y-2.5">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="font-display text-sm font-semibold text-slate-100">
-                  Background Music
+                  Song Clips (Track A1)
                 </h2>
-                <span className="text-xs text-slate-400">MP3, WAV, OGG</span>
+                <span className="font-mono text-xs text-slate-400">
+                  {audioClipsCount} active
+                </span>
               </div>
 
               <input
@@ -910,129 +1322,25 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
                 onChange={(e) => {
                   const file = e.target.files?.[0];
                   if (file) {
-                    onUploadAudio(file);
+                    onUploadAudioFile(file);
                     e.target.value = '';
                   }
                 }}
               />
 
-              {!audioTrack ? (
-                <button
-                  type="button"
-                  disabled={isExporting || audioLoading}
-                  onClick={() => audioInputRef.current?.click()}
-                  className="w-full py-3 px-4 rounded-xl bg-[#090E1B] border border-dashed border-slate-700 hover:border-[#38BDF8] text-xs font-medium text-slate-300 hover:text-slate-100 flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                >
-                  <Upload className="w-4 h-4 text-sky-400" aria-hidden="true" />
-                  <span>
-                    {audioLoading ? 'Decoding audio...' : 'Upload Audio Track'}
-                  </span>
-                </button>
-              ) : (
-                <div className="p-3 rounded-xl bg-[#090E1B] border border-slate-800 space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Music
-                        className="w-4 h-4 text-[#38BDF8] shrink-0"
-                        aria-hidden="true"
-                      />
-                      <div className="min-w-0">
-                        <p className="text-xs font-medium text-slate-100 truncate">
-                          {audioTrack.fileName}
-                        </p>
-                        <p className="text-[11px] font-mono text-slate-400">
-                          {audioTrack.durationSec.toFixed(1)}s source
-                        </p>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      disabled={isExporting}
-                      onClick={onRemoveAudio}
-                      aria-label="Remove background music"
-                      className="w-8 h-8 rounded-lg bg-[#0E1424] border border-slate-800 text-slate-400 hover:text-rose-400 flex items-center justify-center cursor-pointer shrink-0"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
-                    </button>
-                  </div>
-
-                  <div className="space-y-2">
-                    <div>
-                      <div className="flex justify-between text-xs mb-1">
-                        <span className="text-slate-400">Volume</span>
-                        <span className="font-mono text-slate-200">
-                          {Math.round(audioTrack.volume * 100)}%
-                        </span>
-                      </div>
-                      <input
-                        type="range"
-                        min={0}
-                        max={100}
-                        value={Math.round(audioTrack.volume * 100)}
-                        disabled={isExporting}
-                        onChange={(e) =>
-                          onUpdateAudio({
-                            volume: Number(e.target.value) / 100,
-                          })
-                        }
-                        className="studio-slider w-full"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2.5">
-                      <div>
-                        <div className="flex justify-between text-xs mb-1">
-                          <span className="text-slate-400">Fade In</span>
-                          <span className="font-mono text-slate-200">
-                            {audioTrack.fadeInSec.toFixed(1)}s
-                          </span>
-                        </div>
-                        <input
-                          type="range"
-                          min={0}
-                          max={4}
-                          step={0.5}
-                          value={audioTrack.fadeInSec}
-                          disabled={isExporting}
-                          onChange={(e) =>
-                            onUpdateAudio({
-                              fadeInSec: Number(e.target.value),
-                            })
-                          }
-                          className="studio-slider w-full"
-                        />
-                      </div>
-
-                      <div>
-                        <div className="flex justify-between text-xs mb-1">
-                          <span className="text-slate-400">Fade Out</span>
-                          <span className="font-mono text-slate-200">
-                            {audioTrack.fadeOutSec.toFixed(1)}s
-                          </span>
-                        </div>
-                        <input
-                          type="range"
-                          min={0}
-                          max={4}
-                          step={0.5}
-                          value={audioTrack.fadeOutSec}
-                          disabled={isExporting}
-                          onChange={(e) =>
-                            onUpdateAudio({
-                              fadeOutSec: Number(e.target.value),
-                            })
-                          }
-                          className="studio-slider w-full"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {audioError && (
-                <p className="text-xs text-rose-400">{audioError}</p>
-              )}
+              <button
+                type="button"
+                disabled={isExporting}
+                onClick={() => audioInputRef.current?.click()}
+                className="w-full py-2.5 px-4 rounded-xl bg-[#090E1B] border border-dashed border-slate-700 hover:border-[#38BDF8] text-xs font-medium text-slate-200 flex items-center justify-center gap-2 transition-colors cursor-pointer"
+              >
+                <Upload className="w-4 h-4 text-sky-400" aria-hidden="true" />
+                <span>Add Song Clip at Playhead</span>
+              </button>
+              <p className="text-[11px] text-slate-500">
+                Add multiple songs, drag them onto specific timeline parts, and
+                adjust individual volume & fades.
+              </p>
             </div>
           </div>
         )}
@@ -1041,7 +1349,7 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
       {/* Persistent Export Footer inside Inspector */}
       <div
         id="export"
-        className="border-t border-slate-800/90 p-5 bg-[#0A0F1D] space-y-3.5"
+        className="border-t border-slate-800/90 p-4 sm:p-5 bg-[#0A0F1D] space-y-3"
       >
         <div className="flex items-center justify-between gap-3">
           <h2 className="font-display text-sm font-semibold text-slate-100">
@@ -1094,7 +1402,7 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
 
             <div className="flex items-center justify-between gap-2">
               <span className="font-mono text-xs text-slate-400">
-                {exportElapsedSec.toFixed(1)}s / {durationSec}.0s
+                {exportElapsedSec.toFixed(1)}s / {totalDurationSec.toFixed(1)}s
               </span>
               <button
                 type="button"
@@ -1110,11 +1418,11 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
           <button
             type="button"
             onClick={onStartExport}
-            disabled={slideCount === 0}
-            className="w-full inline-flex items-center justify-center gap-2 py-3 px-4 min-h-[46px] rounded-xl bg-[#2563EB] text-white text-sm font-semibold hover:bg-[#1D4ED8] active:scale-[0.99] disabled:opacity-40 disabled:pointer-events-none transition-all cursor-pointer whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#38BDF8]"
+            disabled={clipCount === 0 && audioClipsCount === 0}
+            className="w-full inline-flex items-center justify-center gap-2 py-3 px-4 min-h-[44px] rounded-xl bg-[#2563EB] text-white text-sm font-semibold hover:bg-[#1D4ED8] active:scale-[0.99] disabled:opacity-40 disabled:pointer-events-none transition-all cursor-pointer whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#38BDF8]"
           >
             <Film className="w-4 h-4" aria-hidden="true" />
-            <span>Export Video ({durationSec}s)</span>
+            <span>Export Video ({totalDurationSec.toFixed(1)}s)</span>
           </button>
         )}
 

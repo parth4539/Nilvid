@@ -1,6 +1,6 @@
 import {
   AspectRatioId,
-  AudioTrackConfig,
+  AudioClip,
   ColorGradeConfig,
   ExportResolution,
   ExportResult,
@@ -9,7 +9,7 @@ import {
   ThemeId,
   TitleCardConfig,
 } from '../types/studio';
-import { renderFrame } from './renderer';
+import { renderFrame, syncTimelineVideos } from './renderer';
 import { getDimensionsForAspect } from './themes';
 
 export interface ExportVideoOptions {
@@ -21,7 +21,7 @@ export interface ExportVideoOptions {
   particleOverlay: ParticleOverlayId;
   intro: TitleCardConfig;
   outro: TitleCardConfig;
-  audioTrack: AudioTrackConfig | null;
+  audioClips: AudioClip[];
   signal?: AbortSignal;
   onProgress: (progressPct: number, elapsedSec: number) => void;
   onPreviewFrame?: (canvas: HTMLCanvasElement, timeSec: number) => void;
@@ -72,17 +72,17 @@ export async function exportSlideshowVideo(
     particleOverlay,
     intro,
     outro,
-    audioTrack,
+    audioClips,
     signal,
     onProgress,
     onPreviewFrame,
   } = options;
 
-  if (plan.schedule.length === 0) {
-    throw new Error('Add at least one image before exporting.');
+  if (plan.schedule.length === 0 && audioClips.length === 0) {
+    throw new Error('Add at least one image or video clip before exporting.');
   }
 
-  const durationSec = plan.totalDuration;
+  const durationSec = Math.max(0.5, plan.totalDuration);
   const { width, height } = getDimensionsForAspect(aspectRatio, resolution);
 
   const exportCanvas = document.createElement('canvas');
@@ -98,10 +98,23 @@ export async function exportSlideshowVideo(
     throw new Error('Canvas captureStream() is not supported in this browser.');
   }
 
+  // Pre-seek all video clips to their trim start so initial playback is crisp
+  for (const item of plan.schedule) {
+    if (item.clip.kind === 'video' && item.clip.videoElement) {
+      try {
+        item.clip.videoElement.pause();
+        item.clip.videoElement.currentTime = item.clip.sourceStartSec;
+      } catch {
+        // ignore
+      }
+    }
+  }
+  await new Promise((r) => window.setTimeout(r, 80));
+
   const fps = 30;
   const videoBitsPerSecond = resolution === '1080p' ? 8_000_000 : 4_500_000;
 
-  // Render initial frame before starting stream
+  syncTimelineVideos(plan, 0, true);
   renderFrame(
     ctx,
     width,
@@ -121,10 +134,19 @@ export async function exportSlideshowVideo(
   let combinedStream: MediaStream = canvasStream;
 
   let audioCtx: AudioContext | null = null;
-  let audioSource: AudioBufferSourceNode | null = null;
+  const scheduledSources: AudioBufferSourceNode[] = [];
+
+  const hasVideoAudio = plan.schedule.some(
+    (item) =>
+      item.clip.kind === 'video' &&
+      !item.clip.muted &&
+      item.clip.volume > 0 &&
+      item.clip.audioBuffer
+  );
+  const shouldIncludeAudio = audioClips.length > 0 || hasVideoAudio;
   let hasAudio = false;
 
-  if (audioTrack) {
+  if (shouldIncludeAudio) {
     try {
       const AudioCtx =
         window.AudioContext ||
@@ -135,31 +157,78 @@ export async function exportSlideshowVideo(
         await audioCtx.resume();
       }
       const dest = audioCtx.createMediaStreamDestination();
-      const gainNode = audioCtx.createGain();
-      audioSource = audioCtx.createBufferSource();
-      audioSource.buffer = audioTrack.buffer;
-      audioSource.loop = true;
+      const baseTime = audioCtx.currentTime + 0.02;
 
-      const t0 = audioCtx.currentTime;
-      const vol = Math.max(0.0001, audioTrack.volume);
-      const fadeIn = Math.min(audioTrack.fadeInSec, durationSec * 0.45);
-      const fadeOut = Math.min(audioTrack.fadeOutSec, durationSec * 0.45);
+      // Schedule Track A1 Song Clips
+      for (const aClip of audioClips) {
+        if (aClip.durationSec <= 0.05) continue;
+        const source = audioCtx.createBufferSource();
+        source.buffer = aClip.buffer;
+        source.loop = true;
 
-      if (fadeIn > 0.05) {
-        gainNode.gain.setValueAtTime(0.0001, t0);
-        gainNode.gain.linearRampToValueAtTime(vol, t0 + fadeIn);
-      } else {
-        gainNode.gain.setValueAtTime(vol, t0);
+        const gainNode = audioCtx.createGain();
+        const clipStart = baseTime + aClip.startTime;
+        const clipEnd = clipStart + aClip.durationSec;
+        const vol = Math.max(0.0001, aClip.volume);
+        const fadeIn = Math.min(aClip.fadeInSec, aClip.durationSec * 0.45);
+        const fadeOut = Math.min(aClip.fadeOutSec, aClip.durationSec * 0.45);
+
+        gainNode.gain.setValueAtTime(0.0001, baseTime);
+        if (fadeIn > 0.05) {
+          gainNode.gain.setValueAtTime(0.0001, clipStart);
+          gainNode.gain.linearRampToValueAtTime(vol, clipStart + fadeIn);
+        } else {
+          gainNode.gain.setValueAtTime(vol, clipStart);
+        }
+
+        if (fadeOut > 0.05) {
+          const fadeOutStart = Math.max(clipStart + fadeIn, clipEnd - fadeOut);
+          gainNode.gain.setValueAtTime(vol, fadeOutStart);
+          gainNode.gain.linearRampToValueAtTime(0.0001, clipEnd);
+        } else {
+          gainNode.gain.setValueAtTime(0.0001, clipEnd);
+        }
+
+        source.connect(gainNode);
+        gainNode.connect(dest);
+        const srcOffset = aClip.sourceOffsetSec % Math.max(0.1, aClip.sourceDurationSec);
+        source.start(clipStart, srcOffset, aClip.durationSec);
+        scheduledSources.push(source);
       }
 
-      if (fadeOut > 0.05) {
-        const fadeOutStart = Math.max(t0 + fadeIn, t0 + durationSec - fadeOut);
-        gainNode.gain.setValueAtTime(vol, fadeOutStart);
-        gainNode.gain.linearRampToValueAtTime(0.0001, t0 + durationSec);
-      }
+      // Schedule Unmuted Video Clip Audio
+      for (const item of plan.schedule) {
+        const clip = item.clip;
+        if (
+          clip.kind !== 'video' ||
+          clip.muted ||
+          clip.volume <= 0 ||
+          !clip.audioBuffer
+        ) {
+          continue;
+        }
+        const clipDur = Math.max(0.05, item.endTime - item.startTime);
+        const source = audioCtx.createBufferSource();
+        source.buffer = clip.audioBuffer;
+        source.playbackRate.value = Math.max(0.25, Math.min(4.0, clip.speed));
 
-      audioSource.connect(gainNode);
-      gainNode.connect(dest);
+        const gainNode = audioCtx.createGain();
+        const clipStart = baseTime + item.startTime;
+        const clipEnd = baseTime + item.endTime;
+        const vol = Math.max(0.0001, clip.volume);
+        gainNode.gain.setValueAtTime(vol, clipStart);
+        gainNode.gain.setValueAtTime(0.0001, clipEnd);
+
+        source.connect(gainNode);
+        gainNode.connect(dest);
+
+        const sourceSpan = Math.min(
+          Math.max(0.05, clip.sourceDurationSec - clip.sourceStartSec),
+          clipDur * clip.speed
+        );
+        source.start(clipStart, clip.sourceStartSec, sourceSpan);
+        scheduledSources.push(source);
+      }
 
       combinedStream = new MediaStream([
         ...canvasStream.getVideoTracks(),
@@ -167,7 +236,6 @@ export async function exportSlideshowVideo(
       ]);
       hasAudio = true;
     } catch {
-      // Fallback cleanly to silent video if audio muxing fails
       if (audioCtx) {
         await audioCtx.close().catch(() => {});
         audioCtx = null;
@@ -199,9 +267,10 @@ export async function exportSlideshowVideo(
       if (rafId) cancelAnimationFrame(rafId);
       if (watchdogId) window.clearInterval(watchdogId);
       combinedStream.getTracks().forEach((track) => track.stop());
-      if (audioSource) {
+      syncTimelineVideos(plan, 0, false);
+      for (const s of scheduledSources) {
         try {
-          audioSource.stop();
+          s.stop();
         } catch {
           // ignore
         }
@@ -255,7 +324,8 @@ export async function exportSlideshowVideo(
       const finalMime = recorder.mimeType || mimeType;
       const blob = new Blob(chunks, { type: finalMime });
       const blobUrl = URL.createObjectURL(blob);
-      const filename = `nilvid-${themeId}-${durationSec}s.${extension}`;
+      const roundedDur = Math.round(durationSec);
+      const filename = `nilvid-${themeId}-${roundedDur}s.${extension}`;
 
       onProgress(100, durationSec);
 
@@ -271,9 +341,6 @@ export async function exportSlideshowVideo(
       });
     };
 
-    if (audioSource) {
-      audioSource.start(0);
-    }
     recorder.start(250);
     const startPerfMs = performance.now();
 
@@ -283,6 +350,7 @@ export async function exportSlideshowVideo(
       const elapsedSec = (performance.now() - startPerfMs) / 1000;
       const clampedTime = Math.min(elapsedSec, durationSec);
 
+      syncTimelineVideos(plan, clampedTime, true);
       renderFrame(
         ctx,
         width,

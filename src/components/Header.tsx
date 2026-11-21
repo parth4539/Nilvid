@@ -35,17 +35,17 @@ export const Header: React.FC<HeaderProps> = ({
         >
           <a
             href="#studio"
-            onClick={() => onNavigateTab('theme')}
+            onClick={() => onNavigateTab('clip')}
             className="hover:text-sky-300 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
           >
             Studio
           </a>
           <a
             href="#inspector"
-            onClick={() => onNavigateTab('clip')}
+            onClick={() => onNavigateTab('theme')}
             className="hover:text-sky-300 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
           >
-            Animations
+            Themes
           </a>
           <a
             href="#inspector"
@@ -59,7 +59,7 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={() => onNavigateTab('titles')}
             className="hover:text-sky-300 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
           >
-            Audio & Titles
+            Titles & Audio
           </a>
           <a
             href="#timeline"

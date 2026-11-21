@@ -1,11 +1,12 @@
 import {
   AspectRatioId,
+  AudioClip,
+  ClipScheduleItem,
   ExportResolution,
   RenderPlan,
-  SlideImage,
-  SlideScheduleItem,
   ThemeConfig,
   ThemeId,
+  TimelineClip,
   TitleCardConfig,
 } from '../types/studio';
 
@@ -14,8 +15,8 @@ export const THEMES: Record<ThemeId, ThemeConfig> = {
     id: 'cinematic',
     name: 'Cinematic',
     summary: 'Ken Burns, 3D parallax, dip-to-black & blur dissolves',
-    accentHex: '#F2B705',
-    baseTransitionDuration: 1.15,
+    accentHex: '#38BDF8',
+    baseTransitionDuration: 0.9,
     defaultFilter: 'cinematic',
     defaultParticle: 'film-dust',
     letterboxRatio: 0.085,
@@ -43,7 +44,7 @@ export const THEMES: Record<ThemeId, ThemeConfig> = {
     name: 'Wedding',
     summary: 'Weightless float, ivory bloom, sparkles & soft reveals',
     accentHex: '#E8C5B0',
-    baseTransitionDuration: 1.25,
+    baseTransitionDuration: 1.0,
     defaultFilter: 'warm',
     defaultParticle: 'sparkles',
     letterboxRatio: 0,
@@ -71,7 +72,7 @@ export const THEMES: Record<ThemeId, ThemeConfig> = {
     name: 'Travel',
     summary: 'Panorama pans, 3D cube flips, wipes & directional slides',
     accentHex: '#38BDF8',
-    baseTransitionDuration: 0.78,
+    baseTransitionDuration: 0.7,
     defaultFilter: 'vivid',
     defaultParticle: 'none',
     letterboxRatio: 0,
@@ -97,16 +98,15 @@ export const THEMES: Record<ThemeId, ThemeConfig> = {
   },
   party: {
     id: 'party',
-    label: 'Party',
     name: 'Party',
     summary: 'Photo flick, stomp slam, glitch cuts, confetti & bokeh',
-    accentHex: '#FB7185',
-    baseTransitionDuration: 0.52,
+    accentHex: '#60A5FA',
+    baseTransitionDuration: 0.45,
     defaultFilter: 'vivid',
     defaultParticle: 'confetti',
     letterboxRatio: 0,
     vignetteStrength: 0.32,
-    warmTint: 'rgba(244, 63, 94, 0.06)',
+    warmTint: 'rgba(56, 189, 248, 0.05)',
     innerBorderColor: null,
     animations: [
       'flick-stopmotion',
@@ -124,7 +124,7 @@ export const THEMES: Record<ThemeId, ThemeConfig> = {
       'wipe-diagonal',
       'page-flip',
     ],
-  } as ThemeConfig & { label?: string },
+  },
 };
 
 export const THEME_LIST: ThemeConfig[] = [
@@ -135,119 +135,98 @@ export const THEME_LIST: ThemeConfig[] = [
 ];
 
 export function buildRenderPlan(
-  slides: SlideImage[],
+  clips: TimelineClip[],
   themeId: ThemeId,
-  totalDurationSec: number,
   intro: TitleCardConfig,
-  outro: TitleCardConfig
+  outro: TitleCardConfig,
+  audioClips: AudioClip[] = []
 ): RenderPlan {
   const theme = THEMES[themeId];
-  const count = slides.length;
+  const count = clips.length;
 
-  const maxTitleAllowance = Math.max(0, (totalDurationSec - 3.5) / 2);
-  const introDur = intro.enabled
-    ? Math.min(intro.durationSec, maxTitleAllowance, 4.5)
-    : 0;
-  const outroDur = outro.enabled
-    ? Math.min(outro.durationSec, maxTitleAllowance, 4.5)
-    : 0;
-
+  const introDur = intro.enabled ? Math.max(0.8, Math.min(4.5, intro.durationSec)) : 0;
+  const outroDur = outro.enabled ? Math.max(0.8, Math.min(4.5, outro.durationSec)) : 0;
   const overlapFade = 0.45;
-  const slidesStart = introDur > 0 ? Math.max(0, introDur - overlapFade) : 0;
-  const slidesEnd =
-    outroDur > 0
-      ? Math.min(totalDurationSec, totalDurationSec - outroDur + overlapFade)
-      : totalDurationSec;
 
-  const slidesSpan = Math.max(1, slidesEnd - slidesStart);
+  const slidesStart = introDur > 0 ? Math.max(0, introDur - overlapFade) : 0;
 
   if (count === 0) {
+    const audioMaxEnd = audioClips.reduce(
+      (max, ac) => Math.max(max, ac.startTime + ac.durationSec),
+      0
+    );
+    const total = Math.max(10, introDur + outroDur, audioMaxEnd);
     return {
-      totalDuration: totalDurationSec,
+      totalDuration: Number(total.toFixed(2)),
       introStart: 0,
       introEnd: introDur,
-      outroStart: totalDurationSec - outroDur,
-      outroEnd: totalDurationSec,
+      outroStart: outroDur > 0 ? total - outroDur : total,
+      outroEnd: total,
       slidesStart,
-      slidesEnd,
-      transitionDuration: 0,
-      stepDuration: 0,
+      slidesEnd: slidesStart,
       schedule: [],
     };
   }
 
-  if (count === 1) {
-    const slide = slides[0];
-    const anim = slide.animationOverride ?? theme.animations[0];
-    const trans = slide.transitionOverride ?? theme.transitions[0];
-    return {
-      totalDuration: totalDurationSec,
-      introStart: 0,
-      introEnd: introDur,
-      outroStart: totalDurationSec - outroDur,
-      outroEnd: totalDurationSec,
-      slidesStart,
-      slidesEnd,
-      transitionDuration: 0,
-      stepDuration: slidesSpan,
-      schedule: [
-        {
-          index: 0,
-          slide,
-          startTime: slidesStart,
-          endTime: slidesEnd,
-          soloStartTime: slidesStart,
-          transitionInDuration: 0,
-          transitionOutDuration: 0,
-          transitionOutType: trans,
-          animationId: anim,
-        },
-      ],
-    };
-  }
+  const schedule: ClipScheduleItem[] = [];
+  let cursor = slidesStart;
 
-  const maxAllowedTrans = (slidesSpan / count) * 0.42;
-  const transDur = Math.min(theme.baseTransitionDuration, maxAllowedTrans);
-  const step = (slidesSpan - transDur) / count;
+  for (let i = 0; i < count; i++) {
+    const clip = clips[i];
+    const nextClip = i < count - 1 ? clips[i + 1] : null;
+    const prevItem = i > 0 ? schedule[i - 1] : null;
 
-  const schedule: SlideScheduleItem[] = slides.map((slide, index) => {
-    const startTime = slidesStart + index * step;
-    const endTime =
-      index === count - 1
-        ? slidesEnd
-        : slidesStart + (index + 1) * step + transDur;
-    const transitionInDuration = index === 0 ? 0 : transDur;
-    const transitionOutDuration = index === count - 1 ? 0 : transDur;
+    const transIn = prevItem ? prevItem.transitionOutDuration : 0;
+    const transOut = nextClip
+      ? Math.min(
+          theme.baseTransitionDuration,
+          clip.durationSec * 0.38,
+          nextClip.durationSec * 0.38
+        )
+      : 0;
+
+    const startTime = cursor;
+    const endTime = startTime + clip.durationSec;
+
     const animationId =
-      slide.animationOverride ??
-      theme.animations[index % theme.animations.length];
+      clip.animationOverride ??
+      theme.animations[i % theme.animations.length];
     const transitionOutType =
-      slide.transitionOverride ??
-      theme.transitions[index % theme.transitions.length];
+      clip.transitionOverride ??
+      theme.transitions[i % theme.transitions.length];
 
-    return {
-      index,
-      slide,
+    schedule.push({
+      index: i,
+      clip,
       startTime,
       endTime,
-      soloStartTime: startTime + transitionInDuration,
-      transitionInDuration,
-      transitionOutDuration,
+      soloStartTime: startTime + transIn,
+      transitionInDuration: transIn,
+      transitionOutDuration: transOut,
       transitionOutType,
       animationId,
-    };
-  });
+    });
+
+    cursor = endTime - transOut;
+  }
+
+  const slidesEnd = schedule[schedule.length - 1].endTime;
+  const outroStart = outroDur > 0 ? Math.max(slidesStart, slidesEnd - overlapFade) : slidesEnd;
+  const videoEnd = outroDur > 0 ? outroStart + outroDur : slidesEnd;
+  const audioMaxEnd = audioClips.reduce(
+    (max, ac) => Math.max(max, ac.startTime + ac.durationSec),
+    0
+  );
+  const totalDuration = Number(Math.max(videoEnd, audioMaxEnd).toFixed(2));
 
   return {
-    totalDuration: totalDurationSec,
+    totalDuration,
     introStart: 0,
     introEnd: introDur,
-    outroStart: totalDurationSec - outroDur,
-    outroEnd: totalDurationSec,
+    outroStart,
+    outroEnd: outroDur > 0 ? outroStart + outroDur : totalDuration,
     slidesStart,
     slidesEnd,
-    transitionDuration: transDur,
-    stepDuration: step,
     schedule,
   };
 }

@@ -4,6 +4,8 @@ export type AspectRatioId = '16:9' | '9:16' | '1:1';
 
 export type ExportResolution = '720p' | '1080p';
 
+export type MediaKind = 'image' | 'video' | 'audio';
+
 export type AnimationId =
   | 'ken-burns-in'
   | 'ken-burns-out'
@@ -77,19 +79,64 @@ export type TextAnimationId =
   | 'slide-left'
   | 'cinema-reveal';
 
-export interface SlideImage {
+export interface MediaAsset {
   id: string;
+  kind: MediaKind;
   name: string;
   url: string;
+  thumbnailUrl: string;
   width: number;
   height: number;
-  element: HTMLImageElement;
+  durationSec: number; // default 5s for images, real duration for video/audio
+  imageElement?: HTMLImageElement;
+  audioBuffer?: AudioBuffer | null;
+  waveformPeaks?: number[];
   isSample?: boolean;
+}
+
+export interface TimelineClip {
+  id: string;
+  assetId: string;
+  kind: 'image' | 'video';
+  name: string;
+  url: string;
+  thumbnailUrl: string;
+  width: number;
+  height: number;
+  imageElement?: HTMLImageElement;
+  videoElement?: HTMLVideoElement;
+  audioBuffer?: AudioBuffer | null;
+  sourceDurationSec: number;
+  sourceStartSec: number; // trim in-point inside source video
+  durationSec: number; // duration on timeline
+  speed: number; // video playback rate (0.25 - 4.0)
+  motionSpeed: number; // image/frame animation speed multiplier (0.5 - 2.0)
+  volume: number; // 0 - 1 for video clip native audio
+  muted: boolean;
   animationOverride?: AnimationId;
   transitionOverride?: TransitionId;
+  filterOverride?: ColorFilterId; // undefined or 'auto' means follow global Look
+  brightnessOverride?: number;
+  contrastOverride?: number;
+  saturationOverride?: number;
   caption?: string;
   captionPosition?: CaptionPosition;
   captionAnimation?: TextAnimationId;
+}
+
+export interface AudioClip {
+  id: string;
+  assetId: string;
+  name: string;
+  buffer: AudioBuffer;
+  waveformPeaks: number[];
+  sourceDurationSec: number;
+  startTime: number; // position on timeline in seconds
+  durationSec: number; // length on timeline in seconds
+  sourceOffsetSec: number; // start offset inside source audio
+  volume: number; // 0 - 1
+  fadeInSec: number; // 0 - 5
+  fadeOutSec: number; // 0 - 5
 }
 
 export interface TitleCardConfig {
@@ -102,21 +149,11 @@ export interface TitleCardConfig {
 
 export interface ColorGradeConfig {
   filter: ColorFilterId;
-  brightness: number; // 70 - 130 (default 100)
-  contrast: number; // 70 - 140 (default 100)
-  saturation: number; // 0 - 160 (default 100)
-  vignette: number; // 0 - 100 (default -1 means theme auto, or 0..100 manual)
+  brightness: number; // 70 - 130
+  contrast: number; // 70 - 140
+  saturation: number; // 0 - 160
+  vignette: number; // 0 - 85
   useThemeVignette: boolean;
-}
-
-export interface AudioTrackConfig {
-  fileName: string;
-  url: string;
-  buffer: AudioBuffer;
-  durationSec: number;
-  volume: number; // 0 - 1
-  fadeInSec: number; // 0 - 5
-  fadeOutSec: number; // 0 - 5
 }
 
 export interface ThemeConfig {
@@ -135,9 +172,9 @@ export interface ThemeConfig {
   transitions: TransitionId[];
 }
 
-export interface SlideScheduleItem {
+export interface ClipScheduleItem {
   index: number;
-  slide: SlideImage;
+  clip: TimelineClip;
   startTime: number;
   endTime: number;
   soloStartTime: number;
@@ -155,10 +192,13 @@ export interface RenderPlan {
   outroEnd: number;
   slidesStart: number;
   slidesEnd: number;
-  transitionDuration: number;
-  stepDuration: number;
-  schedule: SlideScheduleItem[];
+  schedule: ClipScheduleItem[];
 }
+
+export type SelectionTarget =
+  | { type: 'clip'; id: string }
+  | { type: 'audio'; id: string }
+  | null;
 
 export interface ExportResult {
   blobUrl: string;
@@ -173,4 +213,4 @@ export interface ExportResult {
 
 export type ExportStatus = 'idle' | 'rendering' | 'complete' | 'error';
 
-export type InspectorTab = 'theme' | 'clip' | 'look' | 'titles';
+export type InspectorTab = 'clip' | 'theme' | 'look' | 'titles';

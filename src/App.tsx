@@ -8,28 +8,37 @@ import React, {
 import { ExportPreviewModal } from './components/ExportPreviewModal';
 import { Footer } from './components/Footer';
 import { Header } from './components/Header';
-import { MediaFilmstrip } from './components/MediaFilmstrip';
+import { MediaBin } from './components/MediaBin';
 import { PreviewStage } from './components/PreviewStage';
 import { StudioControls } from './components/StudioControls';
-import { computeAudioGainAtTime, decodeAudioTrack } from './engine/audio';
+import { TimelineEditor } from './components/TimelineEditor';
+import { computeAudioClipGain } from './engine/audio';
 import {
   exportSlideshowVideo,
   triggerFileDownload,
 } from './engine/exporter';
-import { filesToSlides, loadSampleSlides } from './engine/samples';
+import {
+  cloneTimelineClip,
+  createAudioClipFromAsset,
+  createTimelineClipFromAsset,
+  filesToMediaAssets,
+  loadSampleAssets,
+} from './engine/samples';
 import { buildRenderPlan } from './engine/themes';
 import {
   AnimationId,
   AspectRatioId,
-  AudioTrackConfig,
+  AudioClip,
   ColorGradeConfig,
   ExportResolution,
   ExportResult,
   ExportStatus,
   InspectorTab,
+  MediaAsset,
   ParticleOverlayId,
-  SlideImage,
+  SelectionTarget,
   ThemeId,
+  TimelineClip,
   TitleCardConfig,
   TransitionId,
 } from './types/studio';
@@ -59,13 +68,21 @@ const DEFAULT_OUTRO: TitleCardConfig = {
   animation: 'cinema-reveal',
 };
 
+interface ActiveAudioNode {
+  kind: 'audio' | 'video';
+  id: string;
+  source: AudioBufferSourceNode;
+  gainNode: GainNode;
+}
+
 export default function App() {
-  const [slides, setSlides] = useState<SlideImage[]>([]);
-  const [selectedSlideId, setSelectedSlideId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<InspectorTab>('theme');
+  const [assets, setAssets] = useState<MediaAsset[]>([]);
+  const [clips, setClips] = useState<TimelineClip[]>([]);
+  const [audioClips, setAudioClips] = useState<AudioClip[]>([]);
+  const [selection, setSelection] = useState<SelectionTarget>(null);
+  const [activeTab, setActiveTab] = useState<InspectorTab>('clip');
 
   const [themeId, setThemeId] = useState<ThemeId>('cinematic');
-  const [durationSec, setDurationSec] = useState<number>(20);
   const [aspectRatio, setAspectRatio] = useState<AspectRatioId>('16:9');
   const [resolution, setResolution] = useState<ExportResolution>('1080p');
 
@@ -76,12 +93,9 @@ export default function App() {
   const [intro, setIntro] = useState<TitleCardConfig>(DEFAULT_INTRO);
   const [outro, setOutro] = useState<TitleCardConfig>(DEFAULT_OUTRO);
 
-  const [audioTrack, setAudioTrack] = useState<AudioTrackConfig | null>(null);
-  const [audioLoading, setAudioLoading] = useState<boolean>(false);
-  const [audioError, setAudioError] = useState<string | null>(null);
-
   const [currentTimeSec, setCurrentTimeSec] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [audioSyncEpoch, setAudioSyncEpoch] = useState<number>(0);
 
   const [exportStatus, setExportStatus] = useState<ExportStatus>('idle');
   const [exportProgressPct, setExportProgressPct] = useState<number>(0);
@@ -96,27 +110,39 @@ export default function App() {
   const exportAbortRef = useRef<AbortController | null>(null);
   const lastFrameTimeRef = useRef<number | null>(null);
   const currentTimeRef = useRef<number>(0);
-  const slidesRef = useRef<SlideImage[]>([]);
+  const ownedBlobUrlsRef = useRef<Set<string>>(new Set());
   const exportResultRef = useRef<ExportResult | null>(null);
-  const audioTrackRef = useRef<AudioTrackConfig | null>(null);
+  const audioClipsRef = useRef<AudioClip[]>([]);
+  const clipsRef = useRef<TimelineClip[]>([]);
 
-  // Web Audio live preview refs
+  // Live preview Web Audio refs
   const previewAudioCtxRef = useRef<AudioContext | null>(null);
-  const previewAudioGainRef = useRef<GainNode | null>(null);
-  const previewAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const activeAudioNodesRef = useRef<ActiveAudioNode[]>([]);
 
   currentTimeRef.current = currentTimeSec;
-  slidesRef.current = slides;
   exportResultRef.current = exportResult;
-  audioTrackRef.current = audioTrack;
+  audioClipsRef.current = audioClips;
+  clipsRef.current = clips;
 
+  const plan = useMemo(
+    () => buildRenderPlan(clips, themeId, intro, outro, audioClips),
+    [clips, themeId, intro, outro, audioClips]
+  );
+
+  // Load initial sample photos so the workspace opens immediately playable
   useEffect(() => {
     let cancelled = false;
-    loadSampleSlides()
-      .then((sampleSlides) => {
+    loadSampleAssets()
+      .then((sampleAssets) => {
         if (cancelled) return;
-        setSlides(sampleSlides);
-        setSelectedSlideId(sampleSlides[0]?.id ?? null);
+        const initialClips = sampleAssets.map((a) =>
+          createTimelineClipFromAsset(a)
+        );
+        setAssets(sampleAssets);
+        setClips(initialClips);
+        setSelection(
+          initialClips[0] ? { type: 'clip', id: initialClips[0].id } : null
+        );
         setIsPlaying(true);
       })
       .catch(() => {});
@@ -126,47 +152,70 @@ export default function App() {
     };
   }, []);
 
+  // Cleanup owned URLs, audio contexts, and export abort on unmount
   useEffect(() => {
     return () => {
-      slidesRef.current.forEach((s) => {
-        if (!s.isSample) URL.revokeObjectURL(s.url);
-      });
+      ownedBlobUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      ownedBlobUrlsRef.current.clear();
       if (exportResultRef.current) {
         URL.revokeObjectURL(exportResultRef.current.blobUrl);
       }
-      if (audioTrackRef.current) {
-        URL.revokeObjectURL(audioTrackRef.current.url);
-      }
       exportAbortRef.current?.abort();
+      activeAudioNodesRef.current.forEach((n) => {
+        try {
+          n.source.stop();
+          n.source.disconnect();
+        } catch {
+          // ignore
+        }
+      });
       if (previewAudioCtxRef.current) {
         previewAudioCtxRef.current.close().catch(() => {});
       }
     };
   }, []);
 
-  const plan = useMemo(
-    () => buildRenderPlan(slides, themeId, durationSec, intro, outro),
-    [slides, themeId, durationSec, intro, outro]
-  );
-
-  // Keep selectedSlideId valid when slides change
+  // Keep selection valid when clips/audioClips change
   useEffect(() => {
-    if (slides.length === 0) {
-      setSelectedSlideId(null);
+    if (!selection) {
+      if (clips.length > 0) {
+        setSelection({ type: 'clip', id: clips[0].id });
+      }
       return;
     }
-    if (!selectedSlideId || !slides.some((s) => s.id === selectedSlideId)) {
-      setSelectedSlideId(slides[0].id);
+    if (
+      selection.type === 'clip' &&
+      !clips.some((c) => c.id === selection.id)
+    ) {
+      setSelection(clips[0] ? { type: 'clip', id: clips[0].id } : null);
+    } else if (
+      selection.type === 'audio' &&
+      !audioClips.some((a) => a.id === selection.id)
+    ) {
+      setSelection(clips[0] ? { type: 'clip', id: clips[0].id } : null);
     }
-  }, [slides, selectedSlideId]);
+  }, [clips, audioClips, selection]);
 
   useEffect(() => {
-    setCurrentTimeSec((prev) => Math.min(prev, durationSec));
-  }, [durationSec]);
+    setCurrentTimeSec((prev) => Math.min(prev, plan.totalDuration));
+  }, [plan.totalDuration]);
+
+  const stopPreviewAudioNodes = useCallback(() => {
+    activeAudioNodesRef.current.forEach((entry) => {
+      try {
+        entry.source.stop();
+        entry.source.disconnect();
+      } catch {
+        // ignore
+      }
+    });
+    activeAudioNodesRef.current = [];
+  }, []);
 
   // Real-time playback animation loop
   useEffect(() => {
-    if (!isPlaying || slides.length === 0 || exportStatus === 'rendering') {
+    const hasContent = clips.length > 0 || audioClips.length > 0;
+    if (!isPlaying || !hasContent || exportStatus === 'rendering') {
       lastFrameTimeRef.current = null;
       return;
     }
@@ -176,20 +225,32 @@ export default function App() {
     const tick = (nowMs: number) => {
       if (lastFrameTimeRef.current !== null) {
         const dt = (nowMs - lastFrameTimeRef.current) / 1000;
-        setCurrentTimeSec((prev) => {
-          const next = prev + dt;
-          const wrapped = next >= durationSec ? 0 : next;
-          if (previewAudioGainRef.current && audioTrackRef.current) {
-            previewAudioGainRef.current.gain.value = computeAudioGainAtTime(
-              wrapped,
-              durationSec,
-              audioTrackRef.current.volume,
-              audioTrackRef.current.fadeInSec,
-              audioTrackRef.current.fadeOutSec
-            );
+        const nextRaw = currentTimeRef.current + dt;
+        const wrappedOut = nextRaw >= plan.totalDuration;
+        const wrapped = wrappedOut ? 0 : nextRaw;
+
+        // Real-time per-clip gain updates for fades on Track A1 & Track V1
+        for (const node of activeAudioNodesRef.current) {
+          if (node.kind === 'audio') {
+            const aClip = audioClipsRef.current.find((a) => a.id === node.id);
+            node.gainNode.gain.value = aClip
+              ? computeAudioClipGain(aClip, wrapped)
+              : 0;
+          } else {
+            const item = plan.schedule.find((s) => s.clip.id === node.id);
+            const active =
+              item &&
+              wrapped >= item.startTime &&
+              wrapped <= item.endTime &&
+              !item.clip.muted;
+            node.gainNode.gain.value = active ? item.clip.volume : 0;
           }
-          return wrapped;
-        });
+        }
+
+        if (wrappedOut) {
+          setAudioSyncEpoch((e) => e + 1);
+        }
+        setCurrentTimeSec(wrapped);
       }
       lastFrameTimeRef.current = nowMs;
       rafId = requestAnimationFrame(tick);
@@ -202,78 +263,573 @@ export default function App() {
       cancelAnimationFrame(rafId);
       lastFrameTimeRef.current = null;
     };
-  }, [isPlaying, slides.length, durationSec, exportStatus]);
+  }, [
+    isPlaying,
+    clips.length,
+    audioClips.length,
+    plan,
+    exportStatus,
+  ]);
 
-  // Live preview Web Audio sync
+  // Multi-clip Web Audio scheduling for live preview
+  const audioGraphSignature = useMemo(
+    () =>
+      JSON.stringify({
+        a: audioClips.map((a) => [
+          a.id,
+          a.startTime,
+          a.durationSec,
+          a.sourceOffsetSec,
+        ]),
+        v: plan.schedule.map((s) => [
+          s.clip.id,
+          s.startTime,
+          s.endTime,
+          s.clip.sourceStartSec,
+          s.clip.speed,
+          s.clip.muted,
+        ]),
+      }),
+    [audioClips, plan.schedule]
+  );
+
   useEffect(() => {
-    const stopPreviewAudio = () => {
-      if (previewAudioSourceRef.current) {
-        try {
-          previewAudioSourceRef.current.stop();
-          previewAudioSourceRef.current.disconnect();
-        } catch {
-          // ignore
-        }
-        previewAudioSourceRef.current = null;
-      }
-    };
-
-    if (!isPlaying || !audioTrack || exportStatus === 'rendering' || slides.length === 0) {
-      stopPreviewAudio();
+    const hasContent = clips.length > 0 || audioClips.length > 0;
+    if (!isPlaying || !hasContent || exportStatus === 'rendering') {
+      stopPreviewAudioNodes();
       return;
     }
 
-    const startAudio = async () => {
+    let cancelled = false;
+
+    const startAudioMix = async () => {
       const AudioCtx =
         window.AudioContext ||
         (window as unknown as { webkitAudioContext: typeof AudioContext })
           .webkitAudioContext;
       if (!AudioCtx) return;
 
-      if (!previewAudioCtxRef.current || previewAudioCtxRef.current.state === 'closed') {
+      if (
+        !previewAudioCtxRef.current ||
+        previewAudioCtxRef.current.state === 'closed'
+      ) {
         previewAudioCtxRef.current = new AudioCtx();
       }
       const ctx = previewAudioCtxRef.current;
       if (ctx.state === 'suspended') {
         await ctx.resume().catch(() => {});
       }
+      if (cancelled) return;
 
-      stopPreviewAudio();
+      stopPreviewAudioNodes();
 
-      const source = ctx.createBufferSource();
-      source.buffer = audioTrack.buffer;
-      source.loop = true;
+      const nowT = currentTimeRef.current;
+      const baseAudioTime = ctx.currentTime + 0.015;
+      const nextNodes: ActiveAudioNode[] = [];
 
-      const gainNode = ctx.createGain();
-      gainNode.gain.value = computeAudioGainAtTime(
-        currentTimeRef.current,
-        durationSec,
-        audioTrack.volume,
-        audioTrack.fadeInSec,
-        audioTrack.fadeOutSec
-      );
+      // Schedule Track A1 song clips
+      for (const aClip of audioClipsRef.current) {
+        const clipEnd = aClip.startTime + aClip.durationSec;
+        if (clipEnd <= nowT + 0.02) continue;
 
-      source.connect(gainNode);
-      gainNode.connect(ctx.destination);
+        const source = ctx.createBufferSource();
+        source.buffer = aClip.buffer;
+        source.loop = true;
 
-      const offset = currentTimeRef.current % Math.max(0.1, audioTrack.durationSec);
-      source.start(0, offset);
+        const gainNode = ctx.createGain();
+        gainNode.gain.value = computeAudioClipGain(aClip, nowT);
 
-      previewAudioSourceRef.current = source;
-      previewAudioGainRef.current = gainNode;
+        source.connect(gainNode);
+        gainNode.connect(ctx.destination);
+
+        const delaySec = Math.max(0, aClip.startTime - nowT);
+        const alreadyElapsed = Math.max(0, nowT - aClip.startTime);
+        const srcOffset =
+          (aClip.sourceOffsetSec + alreadyElapsed) %
+          Math.max(0.1, aClip.sourceDurationSec);
+        const playDur = Math.max(0.05, clipEnd - Math.max(nowT, aClip.startTime));
+
+        source.start(baseAudioTime + delaySec, srcOffset, playDur);
+        nextNodes.push({ kind: 'audio', id: aClip.id, source, gainNode });
+      }
+
+      // Schedule unmuted Track V1 video audio
+      for (const item of plan.schedule) {
+        const clip = item.clip;
+        if (
+          clip.kind !== 'video' ||
+          clip.muted ||
+          !clip.audioBuffer ||
+          item.endTime <= nowT + 0.02
+        ) {
+          continue;
+        }
+
+        const source = ctx.createBufferSource();
+        source.buffer = clip.audioBuffer;
+        const rate = Math.max(0.25, Math.min(4.0, clip.speed));
+        source.playbackRate.value = rate;
+
+        const gainNode = ctx.createGain();
+        const isInside = nowT >= item.startTime && nowT <= item.endTime;
+        gainNode.gain.value = isInside ? clip.volume : 0;
+
+        source.connect(gainNode);
+        gainNode.connect(ctx.destination);
+
+        const delaySec = Math.max(0, item.startTime - nowT);
+        const alreadyElapsed = Math.max(0, nowT - item.startTime);
+        const srcOffset = clip.sourceStartSec + alreadyElapsed * rate;
+        const remainingTimelineDur = Math.max(
+          0.05,
+          item.endTime - Math.max(nowT, item.startTime)
+        );
+        const sourceSpan = Math.min(
+          Math.max(0.05, clip.sourceDurationSec - srcOffset),
+          remainingTimelineDur * rate
+        );
+
+        if (sourceSpan > 0.05 && srcOffset < clip.sourceDurationSec) {
+          source.start(baseAudioTime + delaySec, srcOffset, sourceSpan);
+          nextNodes.push({ kind: 'video', id: clip.id, source, gainNode });
+        }
+      }
+
+      activeAudioNodesRef.current = nextNodes;
     };
 
-    startAudio();
+    startAudioMix();
 
     return () => {
-      stopPreviewAudio();
+      cancelled = true;
+      stopPreviewAudioNodes();
     };
-  }, [isPlaying, audioTrack, exportStatus, slides.length, durationSec]);
+  }, [
+    isPlaying,
+    exportStatus,
+    clips.length,
+    audioClips.length,
+    audioGraphSignature,
+    audioSyncEpoch,
+    plan.schedule,
+    stopPreviewAudioNodes,
+  ]);
 
-  // Spacebar play/pause shortcut
+  const handleOpenFilePicker = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleSelectTarget = useCallback((target: SelectionTarget) => {
+    setSelection(target);
+    if (target) {
+      setActiveTab('clip');
+    }
+  }, []);
+
+  const handleSeek = useCallback(
+    (timeSec: number) => {
+      const clamped = Math.max(0, Math.min(plan.totalDuration, timeSec));
+      currentTimeRef.current = clamped;
+      setCurrentTimeSec(clamped);
+      if (isPlaying) {
+        setAudioSyncEpoch((e) => e + 1);
+      }
+    },
+    [plan.totalDuration, isPlaying]
+  );
+
+  // Import files into Media Bin AND add onto Timeline
+  const handleFilesAdded = useCallback(
+    async (
+      files: FileList | File[],
+      targetTrack?: 'video' | 'audio',
+      atTimeSec?: number
+    ) => {
+      try {
+        const decodedAssets = await filesToMediaAssets(files);
+        if (decodedAssets.length === 0) return;
+
+        decodedAssets.forEach((a) => {
+          if (!a.isSample && a.url.startsWith('blob:')) {
+            ownedBlobUrlsRef.current.add(a.url);
+          }
+        });
+
+        setAssets((prev) => [...prev, ...decodedAssets]);
+
+        const visualAssets = decodedAssets.filter(
+          (a) => a.kind === 'image' || a.kind === 'video'
+        );
+        const audioAssets = decodedAssets.filter((a) => a.kind === 'audio');
+
+        let nextSelection: SelectionTarget = null;
+
+        if (visualAssets.length > 0 && targetTrack !== 'audio') {
+          const newClips = visualAssets.map((a) =>
+            createTimelineClipFromAsset(a)
+          );
+          setClips((prev) => {
+            const sampleAssetIds = new Set(
+              assets.filter((a) => a.isSample).map((a) => a.id)
+            );
+            const onlySamples =
+              prev.length > 0 &&
+              prev.every((c) => sampleAssetIds.has(c.assetId));
+            return onlySamples ? newClips : [...prev, ...newClips];
+          });
+          nextSelection = { type: 'clip', id: newClips[0].id };
+        }
+
+        if (audioAssets.length > 0) {
+          let cursor = atTimeSec ?? currentTimeRef.current;
+          const newAudioClips: AudioClip[] = [];
+          for (const aAsset of audioAssets) {
+            const created = createAudioClipFromAsset(aAsset, cursor);
+            if (created) {
+              newAudioClips.push(created);
+              cursor += created.durationSec;
+            }
+          }
+          if (newAudioClips.length > 0) {
+            setAudioClips((prev) => [...prev, ...newAudioClips]);
+            if (!nextSelection) {
+              nextSelection = { type: 'audio', id: newAudioClips[0].id };
+            }
+          }
+        }
+
+        if (nextSelection) {
+          setSelection(nextSelection);
+          setActiveTab('clip');
+        }
+        setExportStatus('idle');
+        setExportError(null);
+      } catch {
+        setExportError(
+          'One or more selected files could not be decoded in this browser.'
+        );
+        setExportStatus('error');
+      }
+    },
+    [assets]
+  );
+
+  const handleLoadSamples = useCallback(async () => {
+    try {
+      const sampleAssets = await loadSampleAssets();
+      const sampleClips = sampleAssets.map((a) =>
+        createTimelineClipFromAsset(a)
+      );
+      setAssets((prev) => [...sampleAssets, ...prev.filter((a) => !a.isSample)]);
+      setClips(sampleClips);
+      setSelection(
+        sampleClips[0] ? { type: 'clip', id: sampleClips[0].id } : null
+      );
+      setCurrentTimeSec(0);
+      setIsPlaying(true);
+      setExportStatus('idle');
+      setExportError(null);
+    } catch {
+      setExportError('Could not load sample photos.');
+      setExportStatus('error');
+    }
+  }, []);
+
+  const handleAddAssetToTimeline = useCallback(
+    (asset: MediaAsset, insertIndex?: number, audioStartTime?: number) => {
+      if (asset.kind === 'audio') {
+        const startAt = audioStartTime ?? currentTimeRef.current;
+        const aClip = createAudioClipFromAsset(asset, startAt);
+        if (!aClip) return;
+        setAudioClips((prev) => [...prev, aClip]);
+        setSelection({ type: 'audio', id: aClip.id });
+        setActiveTab('clip');
+        setExportStatus('idle');
+        return;
+      }
+
+      const newClip = createTimelineClipFromAsset(asset);
+      setClips((prev) => {
+        if (
+          typeof insertIndex === 'number' &&
+          insertIndex >= 0 &&
+          insertIndex <= prev.length
+        ) {
+          const copy = [...prev];
+          copy.splice(insertIndex, 0, newClip);
+          return copy;
+        }
+        return [...prev, newClip];
+      });
+      setSelection({ type: 'clip', id: newClip.id });
+      setActiveTab('clip');
+      setExportStatus('idle');
+    },
+    []
+  );
+
+  const handleDropAssetToVideoTrack = useCallback(
+    (assetId: string, insertIndex?: number) => {
+      const asset = assets.find((a) => a.id === assetId);
+      if (!asset || asset.kind === 'audio') return;
+      handleAddAssetToTimeline(asset, insertIndex);
+    },
+    [assets, handleAddAssetToTimeline]
+  );
+
+  const handleDropAssetToAudioTrack = useCallback(
+    (assetId: string, startTime: number) => {
+      const asset = assets.find((a) => a.id === assetId);
+      if (!asset || asset.kind !== 'audio') return;
+      handleAddAssetToTimeline(asset, undefined, startTime);
+    },
+    [assets, handleAddAssetToTimeline]
+  );
+
+  const handleRemoveAsset = useCallback((assetId: string) => {
+    setAssets((prev) => prev.filter((a) => a.id !== assetId));
+  }, []);
+
+  const handleReorderVideoClip = useCallback(
+    (fromIndex: number, toIndex: number) => {
+      setClips((prev) => {
+        if (
+          fromIndex < 0 ||
+          toIndex < 0 ||
+          fromIndex >= prev.length ||
+          toIndex >= prev.length ||
+          fromIndex === toIndex
+        ) {
+          return prev;
+        }
+        const copy = [...prev];
+        const [moved] = copy.splice(fromIndex, 1);
+        copy.splice(toIndex, 0, moved);
+        return copy;
+      });
+      setExportStatus('idle');
+    },
+    []
+  );
+
+  const handleUpdateVideoClip = useCallback(
+    (clipId: string, patch: Partial<TimelineClip>) => {
+      setClips((prev) =>
+        prev.map((c) => (c.id === clipId ? { ...c, ...patch } : c))
+      );
+      setExportStatus('idle');
+    },
+    []
+  );
+
+  const handleUpdateAudioClip = useCallback(
+    (audioClipId: string, patch: Partial<AudioClip>) => {
+      setAudioClips((prev) =>
+        prev.map((a) => (a.id === audioClipId ? { ...a, ...patch } : a))
+      );
+      setExportStatus('idle');
+    },
+    []
+  );
+
+  const handleDeleteAudioClip = useCallback((audioClipId: string) => {
+    setAudioClips((prev) => prev.filter((a) => a.id !== audioClipId));
+    setExportStatus('idle');
+  }, []);
+
+  // Split selected video/photo clip OR song clip at the current playhead
+  const handleSplitAtPlayhead = useCallback(() => {
+    if (!selection) return;
+
+    if (selection.type === 'clip') {
+      const item = plan.schedule.find((s) => s.clip.id === selection.id);
+      if (!item) return;
+
+      const splitLocalTime = currentTimeRef.current - item.startTime;
+      if (
+        splitLocalTime <= 0.25 ||
+        splitLocalTime >= item.clip.durationSec - 0.25
+      ) {
+        return;
+      }
+
+      const leftDuration = Number(splitLocalTime.toFixed(2));
+      const rightDuration = Number(
+        (item.clip.durationSec - leftDuration).toFixed(2)
+      );
+
+      const rightClone = cloneTimelineClip(item.clip);
+      rightClone.durationSec = Math.max(0.5, rightDuration);
+      if (rightClone.kind === 'video') {
+        rightClone.sourceStartSec = Number(
+          (item.clip.sourceStartSec + leftDuration * item.clip.speed).toFixed(2)
+        );
+      }
+
+      setClips((prev) => {
+        const idx = prev.findIndex((c) => c.id === item.clip.id);
+        if (idx === -1) return prev;
+        const copy = [...prev];
+        copy[idx] = { ...prev[idx], durationSec: Math.max(0.5, leftDuration) };
+        copy.splice(idx + 1, 0, rightClone);
+        return copy;
+      });
+      setSelection({ type: 'clip', id: rightClone.id });
+      setExportStatus('idle');
+      return;
+    }
+
+    if (selection.type === 'audio') {
+      const aClip = audioClips.find((a) => a.id === selection.id);
+      if (!aClip) return;
+
+      const splitOffset = currentTimeRef.current - aClip.startTime;
+      if (splitOffset <= 0.25 || splitOffset >= aClip.durationSec - 0.25) {
+        return;
+      }
+
+      const leftDur = Number(splitOffset.toFixed(2));
+      const rightDur = Number((aClip.durationSec - leftDur).toFixed(2));
+
+      const rightClip: AudioClip = {
+        ...aClip,
+        id: `audioclip-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        startTime: Number((aClip.startTime + leftDur).toFixed(2)),
+        durationSec: Math.max(0.5, rightDur),
+        sourceOffsetSec: Number((aClip.sourceOffsetSec + leftDur).toFixed(2)),
+      };
+
+      setAudioClips((prev) => {
+        const idx = prev.findIndex((a) => a.id === aClip.id);
+        if (idx === -1) return prev;
+        const copy = [...prev];
+        copy[idx] = { ...copy[idx], durationSec: Math.max(0.5, leftDur) };
+        copy.splice(idx + 1, 0, rightClip);
+        return copy;
+      });
+      setSelection({ type: 'audio', id: rightClip.id });
+      setExportStatus('idle');
+    }
+  }, [selection, plan.schedule, audioClips]);
+
+  const handleDuplicateSelected = useCallback(() => {
+    if (!selection) return;
+    if (selection.type === 'clip') {
+      const target = clips.find((c) => c.id === selection.id);
+      if (!target) return;
+      const cloned = cloneTimelineClip(target);
+      setClips((prev) => {
+        const idx = prev.findIndex((c) => c.id === target.id);
+        if (idx === -1) return prev;
+        const copy = [...prev];
+        copy.splice(idx + 1, 0, cloned);
+        return copy;
+      });
+      setSelection({ type: 'clip', id: cloned.id });
+      setExportStatus('idle');
+      return;
+    }
+
+    const aClip = audioClips.find((a) => a.id === selection.id);
+    if (!aClip) return;
+    const clonedAudio: AudioClip = {
+      ...aClip,
+      id: `audioclip-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      startTime: Number((aClip.startTime + aClip.durationSec).toFixed(2)),
+    };
+    setAudioClips((prev) => [...prev, clonedAudio]);
+    setSelection({ type: 'audio', id: clonedAudio.id });
+    setExportStatus('idle');
+  }, [selection, clips, audioClips]);
+
+  const handleDeleteSelected = useCallback(() => {
+    if (!selection) return;
+    if (selection.type === 'clip') {
+      setClips((prev) => {
+        const next = prev.filter((c) => c.id !== selection.id);
+        if (next.length === 0 && audioClipsRef.current.length === 0) {
+          setIsPlaying(false);
+          setCurrentTimeSec(0);
+        }
+        return next;
+      });
+      setExportStatus('idle');
+      return;
+    }
+    setAudioClips((prev) => prev.filter((a) => a.id !== selection.id));
+    setExportStatus('idle');
+  }, [selection]);
+
+  const handleFitTotalDuration = useCallback(
+    (targetSeconds: number) => {
+      if (clips.length === 0) return;
+      const clampedTarget = Math.max(10, Math.min(60, targetSeconds));
+      const introOverlap = intro.enabled
+        ? Math.max(0.35, intro.durationSec - 0.45)
+        : 0;
+      const outroOverlap = outro.enabled
+        ? Math.max(0.35, outro.durationSec - 0.45)
+        : 0;
+      const currentVisualSpan = Math.max(
+        1,
+        plan.slidesEnd - plan.slidesStart
+      );
+      const desiredVisualSpan = Math.max(
+        clips.length * 0.8,
+        clampedTarget - introOverlap - outroOverlap
+      );
+      const ratio = desiredVisualSpan / currentVisualSpan;
+
+      setClips((prev) =>
+        prev.map((clip) => {
+          const scaled = Math.max(0.8, Number((clip.durationSec * ratio).toFixed(2)));
+          if (clip.kind === 'video') {
+            const maxDur = Math.max(
+              0.5,
+              (clip.sourceDurationSec - clip.sourceStartSec) / clip.speed
+            );
+            return { ...clip, durationSec: Math.min(maxDur, scaled) };
+          }
+          return { ...clip, durationSec: Math.min(25, scaled) };
+        })
+      );
+      setExportStatus('idle');
+    },
+    [clips.length, intro.enabled, intro.durationSec, outro.enabled, outro.durationSec, plan.slidesEnd, plan.slidesStart]
+  );
+
+  const handleApplyAnimationToAll = useCallback((anim: AnimationId) => {
+    setClips((prev) => prev.map((c) => ({ ...c, animationOverride: anim })));
+    setExportStatus('idle');
+  }, []);
+
+  const handleApplyTransitionToAll = useCallback((trans: TransitionId) => {
+    setClips((prev) => prev.map((c) => ({ ...c, transitionOverride: trans })));
+    setExportStatus('idle');
+  }, []);
+
+  const handleResetAllClipOverrides = useCallback(() => {
+    setClips((prev) =>
+      prev.map((c) => ({
+        ...c,
+        animationOverride: undefined,
+        transitionOverride: undefined,
+        filterOverride: undefined,
+      }))
+    );
+    setExportStatus('idle');
+  }, []);
+
+  const handleUploadAudioFile = useCallback(
+    async (file: File) => {
+      await handleFilesAdded([file], 'audio', currentTimeRef.current);
+    },
+    [handleFilesAdded]
+  );
+
+  // Keyboard shortcuts: Space (play/pause), S (split cut at playhead)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code !== 'Space') return;
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -285,192 +841,34 @@ export default function App() {
       ) {
         return;
       }
-      if (slides.length > 0 && exportStatus !== 'rendering' && !isPreviewModalOpen) {
+
+      if (exportStatus === 'rendering' || isPreviewModalOpen) return;
+
+      if (e.code === 'Space' && (clips.length > 0 || audioClips.length > 0)) {
         e.preventDefault();
         setIsPlaying((prev) => !prev);
+      } else if (e.code === 'KeyS' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        handleSplitAtPlayhead();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [slides.length, exportStatus, isPreviewModalOpen]);
-
-  const handleFilesAdded = useCallback(async (files: FileList | File[]) => {
-    try {
-      const newSlides = await filesToSlides(files);
-      if (newSlides.length === 0) return;
-
-      setSlides((prev) => {
-        const onlySamples = prev.length > 0 && prev.every((s) => s.isSample);
-        if (onlySamples) {
-          return newSlides;
-        }
-        return [...prev, ...newSlides];
-      });
-      setSelectedSlideId(newSlides[0].id);
-      setCurrentTimeSec(0);
-      setIsPlaying(true);
-      setExportStatus('idle');
-      setExportError(null);
-    } catch {
-      setExportError('One or more selected files could not be decoded as images.');
-      setExportStatus('error');
-    }
-  }, []);
-
-  const handleLoadSamples = useCallback(async () => {
-    try {
-      const sampleSlides = await loadSampleSlides();
-      setSlides((prev) => {
-        prev.forEach((s) => {
-          if (!s.isSample) URL.revokeObjectURL(s.url);
-        });
-        return sampleSlides;
-      });
-      setSelectedSlideId(sampleSlides[0]?.id ?? null);
-      setCurrentTimeSec(0);
-      setIsPlaying(true);
-      setExportStatus('idle');
-      setExportError(null);
-    } catch {
-      setExportError('Could not load sample photos.');
-      setExportStatus('error');
-    }
-  }, []);
-
-  const handleClearAll = useCallback(() => {
-    setIsPlaying(false);
-    setCurrentTimeSec(0);
-    setSlides((prev) => {
-      prev.forEach((s) => {
-        if (!s.isSample) URL.revokeObjectURL(s.url);
-      });
-      return [];
-    });
-    setSelectedSlideId(null);
-    setExportStatus('idle');
-    setExportError(null);
-  }, []);
-
-  const handleRemoveSlide = useCallback((id: string) => {
-    setSlides((prev) => {
-      const target = prev.find((s) => s.id === id);
-      if (target && !target.isSample) {
-        URL.revokeObjectURL(target.url);
-      }
-      const next = prev.filter((s) => s.id !== id);
-      if (next.length === 0) {
-        setIsPlaying(false);
-        setCurrentTimeSec(0);
-      }
-      return next;
-    });
-  }, []);
-
-  const handleMoveSlide = useCallback((index: number, direction: -1 | 1) => {
-    setSlides((prev) => {
-      const targetIdx = index + direction;
-      if (targetIdx < 0 || targetIdx >= prev.length) return prev;
-      const copy = [...prev];
-      const [moved] = copy.splice(index, 1);
-      copy.splice(targetIdx, 0, moved);
-      return copy;
-    });
-  }, []);
-
-  const handleReorderSlide = useCallback((fromIndex: number, toIndex: number) => {
-    setSlides((prev) => {
-      if (
-        fromIndex < 0 ||
-        toIndex < 0 ||
-        fromIndex >= prev.length ||
-        toIndex >= prev.length ||
-        fromIndex === toIndex
-      ) {
-        return prev;
-      }
-      const copy = [...prev];
-      const [moved] = copy.splice(fromIndex, 1);
-      copy.splice(toIndex, 0, moved);
-      return copy;
-    });
-  }, []);
-
-  const handleDuplicateSlide = useCallback((slideId: string) => {
-    setSlides((prev) => {
-      const idx = prev.findIndex((s) => s.id === slideId);
-      if (idx === -1) return prev;
-      const orig = prev[idx];
-      const clone: SlideImage = {
-        ...orig,
-        id: `slide-copy-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        isSample: true, // keep original URL lifetime safe on clone
-      };
-      const copy = [...prev];
-      copy.splice(idx + 1, 0, clone);
-      return copy;
-    });
-  }, []);
-
-  const handleUpdateSlide = useCallback(
-    (slideId: string, patch: Partial<SlideImage>) => {
-      setSlides((prev) =>
-        prev.map((s) => (s.id === slideId ? { ...s, ...patch } : s))
-      );
-      setExportStatus('idle');
-    },
-    []
-  );
-
-  const handleApplyAnimationToAll = useCallback((anim: AnimationId) => {
-    setSlides((prev) => prev.map((s) => ({ ...s, animationOverride: anim })));
-    setExportStatus('idle');
-  }, []);
-
-  const handleApplyTransitionToAll = useCallback((trans: TransitionId) => {
-    setSlides((prev) =>
-      prev.map((s) => ({ ...s, transitionOverride: trans }))
-    );
-    setExportStatus('idle');
-  }, []);
-
-  const handleResetAllSlideOverrides = useCallback(() => {
-    setSlides((prev) =>
-      prev.map((s) => ({
-        ...s,
-        animationOverride: undefined,
-        transitionOverride: undefined,
-      }))
-    );
-    setExportStatus('idle');
-  }, []);
-
-  const handleUploadAudio = useCallback(async (file: File) => {
-    setAudioLoading(true);
-    setAudioError(null);
-    try {
-      const decoded = await decodeAudioTrack(file);
-      setAudioTrack((prev) => {
-        if (prev) URL.revokeObjectURL(prev.url);
-        return decoded;
-      });
-      setExportStatus('idle');
-    } catch {
-      setAudioError('Could not decode this audio file. Try MP3, WAV, or OGG.');
-    } finally {
-      setAudioLoading(false);
-    }
-  }, []);
-
-  const handleRemoveAudio = useCallback(() => {
-    setAudioTrack((prev) => {
-      if (prev) URL.revokeObjectURL(prev.url);
-      return null;
-    });
-    setExportStatus('idle');
-  }, []);
+  }, [
+    clips.length,
+    audioClips.length,
+    exportStatus,
+    isPreviewModalOpen,
+    handleSplitAtPlayhead,
+  ]);
 
   const handleStartExport = useCallback(async () => {
-    if (slides.length === 0 || exportStatus === 'rendering') return;
+    if (
+      (clips.length === 0 && audioClips.length === 0) ||
+      exportStatus === 'rendering'
+    ) {
+      return;
+    }
 
     setIsPlaying(false);
     setExportError(null);
@@ -496,7 +894,7 @@ export default function App() {
         particleOverlay,
         intro,
         outro,
-        audioTrack,
+        audioClips,
         signal: controller.signal,
         onProgress: (pct, elapsed) => {
           setExportProgressPct(pct);
@@ -528,7 +926,8 @@ export default function App() {
       exportAbortRef.current = null;
     }
   }, [
-    slides.length,
+    clips.length,
+    audioClips,
     exportStatus,
     exportResult,
     plan,
@@ -539,38 +938,43 @@ export default function App() {
     particleOverlay,
     intro,
     outro,
-    audioTrack,
   ]);
 
   const handleCancelExport = useCallback(() => {
     exportAbortRef.current?.abort();
   }, []);
 
-  const handleOpenFilePicker = useCallback(() => {
-    fileInputRef.current?.click();
-  }, []);
+  const selectedVideoClip = useMemo(() => {
+    if (selection?.type === 'clip') {
+      return clips.find((c) => c.id === selection.id) ?? null;
+    }
+    return null;
+  }, [selection, clips]);
 
-  const selectedSlide = useMemo(
-    () => slides.find((s) => s.id === selectedSlideId) ?? slides[0] ?? null,
-    [slides, selectedSlideId]
-  );
+  const selectedScheduleItem = useMemo(() => {
+    if (!selectedVideoClip) return null;
+    return (
+      plan.schedule.find((item) => item.clip.id === selectedVideoClip.id) ??
+      null
+    );
+  }, [plan.schedule, selectedVideoClip]);
 
-  const selectedScheduleItem = useMemo(
-    () =>
-      plan.schedule.find((item) => item.slide.id === selectedSlide?.id) ??
-      plan.schedule[0] ??
-      null,
-    [plan.schedule, selectedSlide]
-  );
+  const selectedAudioClip = useMemo(() => {
+    if (selection?.type === 'audio') {
+      return audioClips.find((a) => a.id === selection.id) ?? null;
+    }
+    return null;
+  }, [selection, audioClips]);
 
   const isExporting = exportStatus === 'rendering';
+  const hasContent = clips.length > 0 || audioClips.length > 0;
 
   return (
     <div className="min-h-screen bg-[#070A12] text-slate-100 flex flex-col">
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
+        accept="image/*,video/*,audio/*"
         multiple
         className="hidden"
         onChange={(e) => {
@@ -582,15 +986,25 @@ export default function App() {
       />
 
       <Header
-        canExport={slides.length > 0}
+        canExport={hasContent}
         isExporting={isExporting}
         onExportClick={handleStartExport}
         onNavigateTab={(tab) => setActiveTab(tab)}
       />
 
-      <main className="flex-1 w-full max-w-[1440px] mx-auto px-4 sm:px-6 py-5 sm:py-6 flex flex-col gap-5">
-        {/* Primary Pro Studio Workspace */}
-        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_390px] xl:grid-cols-[minmax(0,1fr)_420px] gap-5 items-start">
+      <main className="flex-1 w-full max-w-[1440px] mx-auto px-4 sm:px-6 py-4 sm:py-5 flex flex-col gap-4">
+        {/* 3-Column Pro NLE Workspace: Media Bin | Program Stage | Inspector */}
+        <div className="grid grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)_360px] xl:grid-cols-[280px_minmax(0,1fr)_380px] gap-4 items-stretch">
+          <MediaBin
+            assets={assets}
+            isExporting={isExporting}
+            onOpenImportPicker={handleOpenFilePicker}
+            onFilesDropped={(files) => handleFilesAdded(files)}
+            onLoadSamples={handleLoadSamples}
+            onAddAssetToTimeline={(asset) => handleAddAssetToTimeline(asset)}
+            onRemoveAsset={handleRemoveAsset}
+          />
+
           <PreviewStage
             plan={plan}
             themeId={themeId}
@@ -603,22 +1017,19 @@ export default function App() {
             particleOverlay={particleOverlay}
             intro={intro}
             outro={outro}
-            audioTrack={audioTrack}
-            hasSlides={slides.length > 0}
+            audioClipsCount={audioClips.length}
+            hasClips={hasContent}
             onTogglePlay={() => setIsPlaying((p) => !p)}
             onRestart={() => {
-              setCurrentTimeSec(0);
+              handleSeek(0);
               setIsPlaying(true);
             }}
-            onSeek={(t) => {
-              setIsPlaying(false);
-              setCurrentTimeSec(t);
-            }}
+            onSeek={handleSeek}
             onAspectRatioChange={(ratio) => {
               setAspectRatio(ratio);
               setExportStatus('idle');
             }}
-            onFilesDropped={handleFilesAdded}
+            onFilesDropped={(files) => handleFilesAdded(files)}
             onOpenFilePicker={handleOpenFilePicker}
             onLoadSamples={handleLoadSamples}
             externalExportCanvas={liveExportCanvas}
@@ -628,20 +1039,19 @@ export default function App() {
             activeTab={activeTab}
             onTabChange={setActiveTab}
             selectedTheme={themeId}
-            durationSec={durationSec}
-            slideCount={slides.length}
-            stepDuration={plan.stepDuration}
-            transitionDuration={plan.transitionDuration}
+            totalDurationSec={plan.totalDuration}
+            clipCount={clips.length}
+            audioClipsCount={audioClips.length}
             resolution={resolution}
-            selectedSlide={selectedSlide}
+            selection={selection}
+            selectedVideoClip={selectedVideoClip}
             selectedScheduleItem={selectedScheduleItem}
+            selectedAudioClip={selectedAudioClip}
+            currentTimeSec={currentTimeSec}
             colorGrade={colorGrade}
             particleOverlay={particleOverlay}
             intro={intro}
             outro={outro}
-            audioTrack={audioTrack}
-            audioLoading={audioLoading}
-            audioError={audioError}
             exportStatus={exportStatus}
             exportProgressPct={exportProgressPct}
             exportElapsedSec={exportElapsedSec}
@@ -651,18 +1061,18 @@ export default function App() {
               setThemeId(id);
               setExportStatus('idle');
             }}
-            onDurationChange={(sec) => {
-              setDurationSec(sec);
-              setExportStatus('idle');
-            }}
+            onFitTotalDuration={handleFitTotalDuration}
             onResolutionChange={(res) => {
               setResolution(res);
               setExportStatus('idle');
             }}
-            onUpdateSlide={handleUpdateSlide}
+            onUpdateVideoClip={handleUpdateVideoClip}
+            onUpdateAudioClip={handleUpdateAudioClip}
+            onDeleteAudioClip={handleDeleteAudioClip}
+            onSplitAtPlayhead={handleSplitAtPlayhead}
             onApplyAnimationToAll={handleApplyAnimationToAll}
             onApplyTransitionToAll={handleApplyTransitionToAll}
-            onResetAllSlideOverrides={handleResetAllSlideOverrides}
+            onResetAllClipOverrides={handleResetAllClipOverrides}
             onUpdateColorGrade={(patch) => {
               setColorGrade((prev) => ({ ...prev, ...patch }));
               setExportStatus('idle');
@@ -683,12 +1093,7 @@ export default function App() {
               setOutro((prev) => ({ ...prev, ...patch }));
               setExportStatus('idle');
             }}
-            onUploadAudio={handleUploadAudio}
-            onUpdateAudio={(patch) => {
-              setAudioTrack((prev) => (prev ? { ...prev, ...patch } : prev));
-              setExportStatus('idle');
-            }}
-            onRemoveAudio={handleRemoveAudio}
+            onUploadAudioFile={handleUploadAudioFile}
             onStartExport={handleStartExport}
             onCancelExport={handleCancelExport}
             onDownloadResult={() => {
@@ -700,24 +1105,27 @@ export default function App() {
           />
         </div>
 
-        {/* Sequence Filmstrip with Drag-to-Reorder */}
-        <MediaFilmstrip
-          schedule={plan.schedule}
-          selectedSlideId={selectedSlide?.id ?? null}
+        {/* Multi-Track NLE Timeline (Track V1 Video/Photos + Track A1 Song Clips) */}
+        <TimelineEditor
+          plan={plan}
+          clips={clips}
+          audioClips={audioClips}
+          assets={assets}
+          selection={selection}
           currentTimeSec={currentTimeSec}
           isExporting={isExporting}
-          onOpenFilePicker={handleOpenFilePicker}
-          onFilesDropped={handleFilesAdded}
-          onLoadSamples={handleLoadSamples}
-          onClearAll={handleClearAll}
-          onMoveSlide={handleMoveSlide}
-          onReorderSlide={handleReorderSlide}
-          onDuplicateSlide={handleDuplicateSlide}
-          onRemoveSlide={handleRemoveSlide}
-          onSelectAndJumpToSlide={(slideId, timeSec) => {
-            setSelectedSlideId(slideId);
-            setCurrentTimeSec(timeSec);
-          }}
+          onSeek={handleSeek}
+          onSelectTarget={handleSelectTarget}
+          onSplitAtPlayhead={handleSplitAtPlayhead}
+          onDuplicateSelected={handleDuplicateSelected}
+          onDeleteSelected={handleDeleteSelected}
+          onReorderVideoClip={handleReorderVideoClip}
+          onTrimVideoClip={handleUpdateVideoClip}
+          onUpdateAudioClip={handleUpdateAudioClip}
+          onDropAssetToVideoTrack={handleDropAssetToVideoTrack}
+          onDropAssetToAudioTrack={handleDropAssetToAudioTrack}
+          onDropFiles={handleFilesAdded}
+          onOpenImportPicker={handleOpenFilePicker}
         />
       </main>
 

@@ -2,12 +2,13 @@ import {
   AnimationId,
   AspectRatioId,
   CaptionPosition,
+  ClipScheduleItem,
   ColorGradeConfig,
   ParticleOverlayId,
   RenderPlan,
-  SlideScheduleItem,
   TextAnimationId,
   ThemeId,
+  TimelineClip,
   TitleCardConfig,
 } from '../types/studio';
 import { buildCompositeFilterString } from './catalog';
@@ -109,9 +110,11 @@ interface AnimationTransform {
 
 function evaluateAnimationTransform(
   animationId: AnimationId,
-  rawProgress: number
+  rawProgress: number,
+  motionSpeed = 1
 ): AnimationTransform {
-  const p = clamp(rawProgress, 0, 1);
+  const scaled = Math.max(0, rawProgress * Math.max(0.25, motionSpeed));
+  const p = clamp(scaled, 0, 1);
   const sineP = easeInOutSine(p);
 
   switch (animationId) {
@@ -173,7 +176,10 @@ function evaluateAnimationTransform(
       };
     case 'bounce-pop': {
       const enter = p < 0.28 ? easeOutBack(p / 0.28) : 1;
-      const baseScale = p < 0.28 ? lerp(0.86, 1.06, enter) : lerp(1.06, 1.13, (p - 0.28) / 0.72);
+      const baseScale =
+        p < 0.28
+          ? lerp(0.86, 1.06, enter)
+          : lerp(1.06, 1.13, (p - 0.28) / 0.72);
       return {
         scale: baseScale,
         panX: 0,
@@ -184,9 +190,9 @@ function evaluateAnimationTransform(
     case 'float-bob':
       return {
         scale: lerp(1.09, 1.14, p),
-        panX: Math.sin(p * Math.PI * 2) * 0.025,
-        panY: Math.cos(p * Math.PI * 3) * 0.02,
-        rotateDeg: Math.sin(p * Math.PI * 2) * 0.8,
+        panX: Math.sin(scaled * Math.PI * 2) * 0.025,
+        panY: Math.cos(scaled * Math.PI * 3) * 0.02,
+        rotateDeg: Math.sin(scaled * Math.PI * 2) * 0.8,
       };
     case 'parallax-depth':
       return {
@@ -198,10 +204,10 @@ function evaluateAnimationTransform(
       };
     case 'breathe-pulse':
       return {
-        scale: 1.08 + Math.sin(p * Math.PI * 4) * 0.045,
+        scale: 1.08 + Math.sin(scaled * Math.PI * 4) * 0.045,
         panX: 0,
         panY: 0,
-        rotateDeg: Math.sin(p * Math.PI * 2) * 0.6,
+        rotateDeg: Math.sin(scaled * Math.PI * 2) * 0.6,
       };
     case 'stomp-slam': {
       if (p < 0.18) {
@@ -222,8 +228,7 @@ function evaluateAnimationTransform(
       };
     }
     case 'flick-stopmotion': {
-      // Canva-style rhythmic in-place stepped flicker
-      const step = Math.floor(p * 8);
+      const step = Math.floor(scaled * 8);
       const scales = [1.05, 1.12, 1.07, 1.15, 1.06, 1.13, 1.08, 1.16];
       const angles = [-1.8, 1.5, -1.0, 2.0, -1.5, 1.2, -0.9, 1.7];
       const xShifts = [-0.015, 0.018, -0.01, 0.015, -0.018, 0.012, -0.014, 0.01];
@@ -239,9 +244,9 @@ function evaluateAnimationTransform(
     case 'swing-pendulum':
       return {
         scale: 1.12,
-        panX: Math.sin(p * Math.PI * 2.5) * 0.025,
-        panY: -Math.abs(Math.cos(p * Math.PI * 2.5)) * 0.015,
-        rotateDeg: Math.sin(p * Math.PI * 2.5) * 2.4,
+        panX: Math.sin(scaled * Math.PI * 2.5) * 0.025,
+        panY: -Math.abs(Math.cos(scaled * Math.PI * 2.5)) * 0.015,
+        rotateDeg: Math.sin(scaled * Math.PI * 2.5) * 2.4,
       };
     case 'tumble-spin': {
       if (p < 0.34) {
@@ -261,9 +266,9 @@ function evaluateAnimationTransform(
       };
     }
     case 'shake-energetic': {
-      const jitterX = Math.sin(p * 42) * 0.012;
-      const jitterY = Math.cos(p * 34) * 0.012;
-      const jitterRot = Math.sin(p * 29) * 1.1;
+      const jitterX = Math.sin(scaled * 42) * 0.012;
+      const jitterY = Math.cos(scaled * 34) * 0.012;
+      const jitterRot = Math.sin(scaled * 29) * 1.1;
       return {
         scale: lerp(1.08, 1.18, p),
         panX: jitterX,
@@ -283,9 +288,11 @@ function evaluateAnimationTransform(
   }
 }
 
-function drawCoverImage(
+function drawCoverDrawable(
   ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement,
+  source: HTMLImageElement | HTMLVideoElement,
+  srcW: number,
+  srcH: number,
   width: number,
   height: number,
   scale: number,
@@ -294,7 +301,8 @@ function drawCoverImage(
   rotateDeg: number,
   filter: string
 ) {
-  const imgAspect = img.naturalWidth / img.naturalHeight;
+  if (!srcW || !srcH) return;
+  const imgAspect = srcW / srcH;
   const canvasAspect = width / height;
 
   let baseDrawW: number;
@@ -307,7 +315,8 @@ function drawCoverImage(
     baseDrawH = width / imgAspect;
   }
 
-  const rotSafetyScale = Math.abs(rotateDeg) > 0.1 ? 1 + Math.abs(rotateDeg) * 0.018 : 1;
+  const rotSafetyScale =
+    Math.abs(rotateDeg) > 0.1 ? 1 + Math.abs(rotateDeg) * 0.018 : 1;
   const safeScale = Math.max(1.02, scale) * rotSafetyScale;
   const finalW = baseDrawW * safeScale;
   const finalH = baseDrawH * safeScale;
@@ -325,42 +334,110 @@ function drawCoverImage(
   if (rotateDeg !== 0) {
     ctx.rotate((rotateDeg * Math.PI) / 180);
   }
-  ctx.drawImage(img, -finalW / 2, -finalH / 2, finalW, finalH);
+  ctx.drawImage(source, -finalW / 2, -finalH / 2, finalW, finalH);
   ctx.restore();
 }
 
-function drawSlideToContext(
+function resolveClipLook(
+  clip: TimelineClip,
+  themeId: ThemeId,
+  globalGrade: ColorGradeConfig
+): { filter: string; tintOverlay: string | null } {
+  const theme = THEMES[themeId];
+  const hasFilterOverride =
+    clip.filterOverride && clip.filterOverride !== 'auto';
+  const resolvedFilter = hasFilterOverride
+    ? (clip.filterOverride as Exclude<typeof clip.filterOverride, 'auto' | undefined>)
+    : globalGrade.filter === 'auto'
+    ? theme.defaultFilter
+    : globalGrade.filter;
+
+  const effectiveGrade: ColorGradeConfig = {
+    ...globalGrade,
+    brightness: clip.brightnessOverride ?? globalGrade.brightness,
+    contrast: clip.contrastOverride ?? globalGrade.contrast,
+    saturation: clip.saturationOverride ?? globalGrade.saturation,
+  };
+
+  const { filter, tintOverlay } = buildCompositeFilterString(
+    resolvedFilter,
+    effectiveGrade
+  );
+  const combinedTint =
+    tintOverlay ?? (globalGrade.filter === 'auto' && !hasFilterOverride ? theme.warmTint : null);
+
+  return { filter, tintOverlay: combinedTint };
+}
+
+function drawClipToContext(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-  item: SlideScheduleItem,
+  item: ClipScheduleItem,
   currentTimeSec: number,
-  filterStr: string,
-  tintOverlay: string | null
+  themeId: ThemeId,
+  globalGrade: ColorGradeConfig
 ) {
   ctx.save();
   ctx.fillStyle = '#050506';
   ctx.fillRect(0, 0, width, height);
 
-  const img = item.slide.element;
-  if (!img || !img.naturalWidth || !img.naturalHeight) {
+  const clip = item.clip;
+  let source: HTMLImageElement | HTMLVideoElement | null = null;
+  let srcW = 0;
+  let srcH = 0;
+
+  if (clip.kind === 'video') {
+    if (clip.videoElement && clip.videoElement.readyState >= 2) {
+      source = clip.videoElement;
+      srcW = clip.videoElement.videoWidth || clip.width;
+      srcH = clip.videoElement.videoHeight || clip.height;
+    } else if (clip.imageElement && clip.imageElement.naturalWidth) {
+      source = clip.imageElement;
+      srcW = clip.imageElement.naturalWidth;
+      srcH = clip.imageElement.naturalHeight;
+    }
+  } else if (clip.imageElement && clip.imageElement.naturalWidth) {
+    source = clip.imageElement;
+    srcW = clip.imageElement.naturalWidth;
+    srcH = clip.imageElement.naturalHeight;
+  }
+
+  if (!source || !srcW || !srcH) {
     ctx.restore();
     return;
   }
 
+  const { filter: filterStr, tintOverlay } = resolveClipLook(
+    clip,
+    themeId,
+    globalGrade
+  );
+
   const duration = Math.max(0.001, item.endTime - item.startTime);
   const rawProgress = clamp((currentTimeSec - item.startTime) / duration, 0, 1);
-  const tf = evaluateAnimationTransform(item.animationId, rawProgress);
+
+  // Videos keep full-frame unless user explicitly picks an animation override,
+  // or apply subtle/selected motion when animationOverride is set
+  const tf =
+    clip.kind === 'video' && !clip.animationOverride
+      ? { scale: 1.0, panX: 0, panY: 0, rotateDeg: 0, parallaxMode: false }
+      : evaluateAnimationTransform(
+          item.animationId,
+          rawProgress,
+          clip.motionSpeed
+        );
 
   if (tf.parallaxMode) {
-    // Background blurred layer moving slower
     const bgFilter =
       filterStr && filterStr !== 'none'
         ? `${filterStr} blur(18px) brightness(0.65)`
         : 'blur(18px) brightness(0.65)';
-    drawCoverImage(
+    drawCoverDrawable(
       ctx,
-      img,
+      source,
+      srcW,
+      srcH,
       width,
       height,
       1.18,
@@ -370,7 +447,6 @@ function drawSlideToContext(
       bgFilter
     );
 
-    // Foreground elevated crisp layer moving faster
     const cardScale = 0.84;
     const cardW = width * cardScale;
     const cardH = height * cardScale;
@@ -393,9 +469,11 @@ function drawSlideToContext(
     ctx.roundRect(cardX, cardY, cardW, cardH, radius);
     ctx.clip();
     ctx.translate(cardX, cardY);
-    drawCoverImage(
+    drawCoverDrawable(
       ctx,
-      img,
+      source,
+      srcW,
+      srcH,
       cardW,
       cardH,
       tf.scale,
@@ -406,9 +484,11 @@ function drawSlideToContext(
     );
     ctx.restore();
   } else {
-    drawCoverImage(
+    drawCoverDrawable(
       ctx,
-      img,
+      source,
+      srcW,
+      srcH,
       width,
       height,
       tf.scale,
@@ -424,15 +504,14 @@ function drawSlideToContext(
     ctx.fillRect(0, 0, width, height);
   }
 
-  // Per-slide animated caption
-  if (item.slide.caption && item.slide.caption.trim().length > 0) {
+  if (clip.caption && clip.caption.trim().length > 0) {
     drawSlideCaption(
       ctx,
       width,
       height,
-      item.slide.caption,
-      item.slide.captionPosition ?? 'bottom-center',
-      item.slide.captionAnimation ?? 'fade-rise',
+      clip.caption,
+      clip.captionPosition ?? 'bottom-center',
+      clip.captionAnimation ?? 'fade-rise',
       rawProgress,
       duration
     );
@@ -454,8 +533,11 @@ function drawSlideCaption(
   const enterDur = Math.min(0.35, 0.7 / Math.max(1, slideDuration));
   const exitStart = Math.max(0.65, 1 - 0.5 / Math.max(1, slideDuration));
 
-  let enterP = clamp(rawProgress / enterDur, 0, 1);
-  let exitAlpha = rawProgress > exitStart ? 1 - clamp((rawProgress - exitStart) / (1 - exitStart), 0, 1) : 1;
+  const enterP = clamp(rawProgress / enterDur, 0, 1);
+  const exitAlpha =
+    rawProgress > exitStart
+      ? 1 - clamp((rawProgress - exitStart) / (1 - exitStart), 0, 1)
+      : 1;
 
   const easedEnter = easeOutCubic(enterP);
   let alpha = easedEnter * exitAlpha;
@@ -473,7 +555,12 @@ function drawSlideCaption(
       textScale = lerp(0.84, 1, easeOutBack(enterP));
       break;
     case 'typewriter': {
-      const charCount = Math.max(1, Math.round(text.length * clamp(rawProgress / Math.min(0.6, enterDur * 1.6), 0, 1)));
+      const charCount = Math.max(
+        1,
+        Math.round(
+          text.length * clamp(rawProgress / Math.min(0.6, enterDur * 1.6), 0, 1)
+        )
+      );
       displayText = text.slice(0, charCount);
       alpha = exitAlpha;
       break;
@@ -504,7 +591,6 @@ function drawSlideCaption(
 
   let anchorX = width / 2;
   let anchorY = height * 0.84;
-  let textAlign: CanvasTextAlign = 'center';
 
   if (position === 'bottom-left') {
     anchorX = width * 0.07 + boxW / 2;
@@ -526,18 +612,17 @@ function drawSlideCaption(
     ctx.clip();
   }
 
-  // Soft dark backdrop scrim for 4.5:1 legibility across any photo
-  ctx.fillStyle = 'rgba(9, 9, 11, 0.68)';
+  ctx.fillStyle = 'rgba(7, 10, 18, 0.72)';
   ctx.beginPath();
   ctx.roundRect(-boxW / 2, -boxH / 2, boxW, boxH, Math.round(boxH * 0.22));
   ctx.fill();
 
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
+  ctx.strokeStyle = 'rgba(56, 189, 248, 0.22)';
   ctx.lineWidth = Math.max(1, width * 0.0012);
   ctx.stroke();
 
   ctx.fillStyle = '#FAFAFA';
-  ctx.textAlign = textAlign;
+  ctx.textAlign = 'center';
   ctx.fillText(displayText, 0, 0, maxBoxW - padX * 1.4);
   ctx.restore();
 }
@@ -556,8 +641,7 @@ function drawTitleCard(
   ctx.save();
   ctx.globalAlpha = clamp(fadeAlpha, 0, 1);
 
-  // Cinema dark backdrop with radial accent glow
-  ctx.fillStyle = '#070709';
+  ctx.fillStyle = '#070A12';
   ctx.fillRect(0, 0, width, height);
 
   const glow = ctx.createRadialGradient(
@@ -568,7 +652,7 @@ function drawTitleCard(
     height / 2,
     Math.max(width, height) * 0.6
   );
-  glow.addColorStop(0, `${accentHex}24`);
+  glow.addColorStop(0, `${accentHex}28`);
   glow.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = glow;
   ctx.fillRect(0, 0, width, height);
@@ -578,7 +662,7 @@ function drawTitleCard(
   const subSize = Math.round(Math.min(width, height) * 0.028);
 
   let titleText = card.title || 'Untitled Reel';
-  let subText = card.subtitle || '';
+  const subText = card.subtitle || '';
   let offsetY = 0;
   let offsetX = 0;
   let scale = 1;
@@ -590,7 +674,10 @@ function drawTitleCard(
   } else if (card.animation === 'slide-left') {
     offsetX = (1 - enterP) * width * 0.12;
   } else if (card.animation === 'typewriter') {
-    const count = Math.max(1, Math.round(titleText.length * clamp(progress / 0.55, 0, 1)));
+    const count = Math.max(
+      1,
+      Math.round(titleText.length * clamp(progress / 0.55, 0, 1))
+    );
     titleText = titleText.slice(0, count);
   }
 
@@ -599,24 +686,33 @@ function drawTitleCard(
 
   if (card.animation === 'cinema-reveal') {
     ctx.beginPath();
-    ctx.rect(-width * 0.45 * enterP, -height * 0.3, width * 0.9 * enterP, height * 0.6);
+    ctx.rect(
+      -width * 0.45 * enterP,
+      -height * 0.3,
+      width * 0.9 * enterP,
+      height * 0.6
+    );
     ctx.clip();
   }
 
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
-  // Decorative accent rule
   const ruleW = Math.round(width * 0.07 * enterP);
   ctx.fillStyle = accentHex;
-  ctx.fillRect(-ruleW / 2, -titleSize * 0.85, ruleW, Math.max(2, Math.round(height * 0.004)));
+  ctx.fillRect(
+    -ruleW / 2,
+    -titleSize * 0.85,
+    ruleW,
+    Math.max(2, Math.round(height * 0.004))
+  );
 
-  ctx.fillStyle = '#F4F4F5';
+  ctx.fillStyle = '#F8FAFC';
   ctx.font = `700 ${titleSize}px "Outfit", sans-serif`;
   ctx.fillText(titleText, 0, subText ? -subSize * 0.55 : 0, width * 0.84);
 
   if (subText) {
-    ctx.fillStyle = '#A1A1AA';
+    ctx.fillStyle = '#94A3B8';
     ctx.font = `400 ${subSize}px "Plus Jakarta Sans", sans-serif`;
     ctx.fillText(subText, 0, titleSize * 0.68, width * 0.78);
   }
@@ -656,17 +752,22 @@ function drawParticles(
     for (let i = 0; i < count; i++) {
       const seed = (i + 1) * 1.732;
       const speed = 0.25 + (i % 4) * 0.12;
-      const px = ((Math.sin(seed * 3.1 + timeSec * speed) * 0.5 + 0.5) * 1.1 - 0.05) * width;
-      const py = ((Math.cos(seed * 2.3 + timeSec * speed * 0.8) * 0.5 + 0.5) * 1.1 - 0.05) * height;
+      const px =
+        ((Math.sin(seed * 3.1 + timeSec * speed) * 0.5 + 0.5) * 1.1 - 0.05) *
+        width;
+      const py =
+        ((Math.cos(seed * 2.3 + timeSec * speed * 0.8) * 0.5 + 0.5) * 1.1 -
+          0.05) *
+        height;
       const radius = width * (0.025 + (i % 5) * 0.014);
       const pulse = 0.08 + 0.06 * Math.sin(timeSec * 2.4 + i);
       const grad = ctx.createRadialGradient(px, py, 0, px, py, radius);
       const col =
         i % 3 === 0
-          ? `rgba(251, 113, 133, ${pulse})`
+          ? `rgba(56, 189, 248, ${pulse})`
           : i % 3 === 1
-          ? `rgba(250, 204, 21, ${pulse * 0.9})`
-          : `rgba(56, 189, 248, ${pulse * 0.85})`;
+          ? `rgba(37, 99, 235, ${pulse * 0.95})`
+          : `rgba(251, 113, 133, ${pulse * 0.85})`;
       grad.addColorStop(0, col);
       grad.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.fillStyle = grad;
@@ -699,7 +800,7 @@ function drawParticles(
 
   if (particleId === 'confetti') {
     ctx.save();
-    const colors = ['#F2B705', '#FB7185', '#38BDF8', '#34D399', '#A78BFA'];
+    const colors = ['#38BDF8', '#2563EB', '#F2B705', '#FB7185', '#34D399'];
     const count = 44;
     for (let i = 0; i < count; i++) {
       const seedX = ((i * 61.3) % 100) / 100;
@@ -729,14 +830,21 @@ function drawParticles(
     const count = 32;
     for (let i = 0; i < count; i++) {
       const x = (((i * 89.3 + 17) % 100) / 100) * width;
-      const y = (((i * 53.7 + 11) % 100 - timeSec * (2 + (i % 3))) % 100 + 100) % 100 / 100 * height;
-      const twinkle = Math.max(0, Math.sin(timeSec * (2.8 + (i % 4) * 0.7) + i * 1.9));
+      const y =
+        (((((i * 53.7 + 11) % 100) - timeSec * (2 + (i % 3))) % 100 + 100) %
+          100 /
+          100) *
+        height;
+      const twinkle = Math.max(
+        0,
+        Math.sin(timeSec * (2.8 + (i % 4) * 0.7) + i * 1.9)
+      );
       if (twinkle < 0.15) continue;
       const size = width * (0.006 + (i % 3) * 0.003) * twinkle;
 
       ctx.save();
       ctx.translate(x, y);
-      ctx.fillStyle = `rgba(255, 240, 200, ${twinkle * 0.85})`;
+      ctx.fillStyle = `rgba(224, 242, 254, ${twinkle * 0.85})`;
       ctx.beginPath();
       ctx.moveTo(0, -size);
       ctx.lineTo(size * 0.25, -size * 0.25);
@@ -770,7 +878,6 @@ function drawGlobalOverlays(
 
   drawParticles(ctx, width, height, resolvedParticle, timeSec);
 
-  // Vignette
   const vignetteStrength = colorGrade.useThemeVignette
     ? theme.vignetteStrength
     : colorGrade.vignette / 100;
@@ -794,25 +901,87 @@ function drawGlobalOverlays(
     ctx.restore();
   }
 
-  // Delicate inner hairline frame for Wedding
   if (theme.innerBorderColor) {
     ctx.save();
     const inset = Math.round(Math.min(width, height) * 0.038);
     ctx.strokeStyle = theme.innerBorderColor;
-    ctx.lineWidth = Math.max(1.5, Math.round(Math.min(width, height) * 0.0022));
+    ctx.lineWidth = Math.max(
+      1.5,
+      Math.round(Math.min(width, height) * 0.0022)
+    );
     ctx.strokeRect(inset, inset, width - inset * 2, height - inset * 2);
     ctx.restore();
   }
 
-  // Cinema letterbox matte bars
   if (theme.letterboxRatio > 0) {
-    const ratio = aspectRatio === '9:16' ? theme.letterboxRatio * 0.72 : theme.letterboxRatio;
+    const ratio =
+      aspectRatio === '9:16'
+        ? theme.letterboxRatio * 0.72
+        : theme.letterboxRatio;
     const barH = Math.round(height * ratio);
     ctx.save();
     ctx.fillStyle = '#050506';
     ctx.fillRect(0, 0, width, barH);
     ctx.fillRect(0, height - barH, width, barH);
     ctx.restore();
+  }
+}
+
+export function syncTimelineVideos(
+  plan: RenderPlan,
+  currentTimeSec: number,
+  isPlaying: boolean
+): void {
+  for (let i = 0; i < plan.schedule.length; i++) {
+    const item = plan.schedule[i];
+    const clip = item.clip;
+    if (clip.kind !== 'video' || !clip.videoElement) continue;
+    const videoEl = clip.videoElement;
+
+    const isNear =
+      currentTimeSec >= item.startTime - 0.15 &&
+      currentTimeSec <= item.endTime + 0.05;
+
+    if (isNear) {
+      const rate = clamp(clip.speed, 0.25, 4.0);
+      if (Math.abs(videoEl.playbackRate - rate) > 0.01) {
+        videoEl.playbackRate = rate;
+      }
+
+      const localElapsed = Math.max(0, currentTimeSec - item.startTime);
+      const maxSource = Math.max(0.05, clip.sourceDurationSec - 0.04);
+      const targetSourceTime = clamp(
+        clip.sourceStartSec + localElapsed * rate,
+        0,
+        maxSource
+      );
+
+      if (isPlaying) {
+        if (Math.abs(videoEl.currentTime - targetSourceTime) > 0.28) {
+          try {
+            videoEl.currentTime = targetSourceTime;
+          } catch {
+            // ignore unready seek
+          }
+        }
+        if (videoEl.paused && currentTimeSec >= item.startTime - 0.06) {
+          videoEl.play().catch(() => {});
+        }
+      } else {
+        if (!videoEl.paused) {
+          videoEl.pause();
+        }
+        if (Math.abs(videoEl.currentTime - targetSourceTime) > 0.04) {
+          try {
+            videoEl.currentTime = targetSourceTime;
+          } catch {
+            // ignore
+          }
+        }
+      }
+    } else if (!videoEl.paused) {
+      videoEl.pause();
+    }
   }
 }
 
@@ -837,18 +1006,9 @@ export function renderFrame(
   ctx.fillRect(0, 0, width, height);
   ctx.restore();
 
-  const resolvedFilter =
-    colorGrade.filter === 'auto' ? theme.defaultFilter : colorGrade.filter;
-  const { filter: filterStr, tintOverlay } = buildCompositeFilterString(
-    resolvedFilter,
-    colorGrade
-  );
-  const combinedTint = tintOverlay ?? (colorGrade.filter === 'auto' ? theme.warmTint : null);
-
-  // Render slides if within slides span or schedule exists
   if (plan.schedule.length > 0) {
-    let outgoing: SlideScheduleItem | null = null;
-    let incoming: SlideScheduleItem | null = null;
+    let outgoing: ClipScheduleItem | null = null;
+    let incoming: ClipScheduleItem | null = null;
 
     if (t <= plan.schedule[0].startTime) {
       outgoing = plan.schedule[0];
@@ -871,7 +1031,7 @@ export function renderFrame(
     if (!outgoing) outgoing = plan.schedule[plan.schedule.length - 1];
 
     if (!incoming) {
-      drawSlideToContext(ctx, width, height, outgoing, t, filterStr, combinedTint);
+      drawClipToContext(ctx, width, height, outgoing, t, themeId, colorGrade);
     } else {
       const transDur = Math.max(0.001, outgoing.endTime - incoming.startTime);
       const rawTrans = clamp((t - incoming.startTime) / transDur, 0, 1);
@@ -882,8 +1042,8 @@ export function renderFrame(
       const inCtx = inCanvas.getContext('2d', { alpha: false });
 
       if (outCtx && inCtx) {
-        drawSlideToContext(outCtx, width, height, outgoing, t, filterStr, combinedTint);
-        drawSlideToContext(inCtx, width, height, incoming, t, filterStr, combinedTint);
+        drawClipToContext(outCtx, width, height, outgoing, t, themeId, colorGrade);
+        drawClipToContext(inCtx, width, height, incoming, t, themeId, colorGrade);
 
         switch (transType) {
           case 'crossfade': {
@@ -895,7 +1055,6 @@ export function renderFrame(
             ctx.restore();
             break;
           }
-
           case 'dip-black': {
             if (rawTrans < 0.5) {
               const p = smoothstep(rawTrans * 2);
@@ -912,7 +1071,6 @@ export function renderFrame(
             }
             break;
           }
-
           case 'bloom-ivory': {
             const p = smoothstep(rawTrans);
             ctx.drawImage(outCanvas, 0, 0);
@@ -929,10 +1087,11 @@ export function renderFrame(
             }
             break;
           }
-
           case 'blur-dissolve': {
             const p = smoothstep(rawTrans);
-            const blurPx = Math.round(Math.sin(rawTrans * Math.PI) * Math.min(width, height) * 0.022);
+            const blurPx = Math.round(
+              Math.sin(rawTrans * Math.PI) * Math.min(width, height) * 0.022
+            );
             ctx.save();
             if ('filter' in ctx && blurPx > 0) ctx.filter = `blur(${blurPx}px)`;
             ctx.drawImage(outCanvas, 0, 0);
@@ -941,7 +1100,6 @@ export function renderFrame(
             ctx.restore();
             break;
           }
-
           case 'wipe-left': {
             const p = easeInOutCubic(rawTrans);
             const splitX = width * (1 - p);
@@ -954,7 +1112,6 @@ export function renderFrame(
             ctx.restore();
             break;
           }
-
           case 'wipe-right': {
             const p = easeInOutCubic(rawTrans);
             const splitX = width * p;
@@ -967,7 +1124,6 @@ export function renderFrame(
             ctx.restore();
             break;
           }
-
           case 'wipe-diagonal': {
             const p = easeInOutCubic(rawTrans);
             const xTop = lerp(-width * 0.4, width * 1.4, p);
@@ -985,7 +1141,6 @@ export function renderFrame(
             ctx.restore();
             break;
           }
-
           case 'blinds-venetian': {
             const p = easeInOutCubic(rawTrans);
             const slats = 8;
@@ -1001,7 +1156,6 @@ export function renderFrame(
             ctx.restore();
             break;
           }
-
           case 'slide-left': {
             const p = easeInOutCubic(rawTrans);
             ctx.drawImage(outCanvas, -p * width * 0.35, 0);
@@ -1012,7 +1166,6 @@ export function renderFrame(
             ctx.drawImage(inCanvas, (1 - p) * width, 0);
             break;
           }
-
           case 'slide-right': {
             const p = easeInOutCubic(rawTrans);
             ctx.drawImage(outCanvas, p * width * 0.35, 0);
@@ -1023,7 +1176,6 @@ export function renderFrame(
             ctx.drawImage(inCanvas, -(1 - p) * width, 0);
             break;
           }
-
           case 'slide-up': {
             const p = easeInOutCubic(rawTrans);
             ctx.drawImage(outCanvas, 0, -p * height * 0.35);
@@ -1034,21 +1186,17 @@ export function renderFrame(
             ctx.drawImage(inCanvas, 0, (1 - p) * height);
             break;
           }
-
           case 'whip-pan': {
             const p = easeInOutQuart(rawTrans);
             ctx.drawImage(outCanvas, -p * width, 0);
             ctx.drawImage(inCanvas, (1 - p) * width, 0);
             break;
           }
-
           case 'cube-flip': {
-            // 3D horizontal cube rotation with perspective face squeeze & lighting
             const p = easeInOutCubic(rawTrans);
             const splitX = width * (1 - p);
             const outW = splitX;
             const inW = width - splitX;
-
             if (outW > 1) {
               ctx.drawImage(outCanvas, 0, 0, width, height, 0, 0, outW, height);
               ctx.save();
@@ -1065,24 +1213,20 @@ export function renderFrame(
             }
             break;
           }
-
           case 'page-flip': {
             const p = easeInOutCubic(rawTrans);
             const cosVal = Math.cos(p * Math.PI);
             const scaleX = Math.max(0.02, Math.abs(cosVal));
-            const showIncoming = p >= 0.5;
-            const source = showIncoming ? inCanvas : outCanvas;
+            const source = p >= 0.5 ? inCanvas : outCanvas;
             const drawW = width * scaleX;
             const drawX = (width - drawW) / 2;
             ctx.drawImage(source, 0, 0, width, height, drawX, 0, drawW, height);
             ctx.save();
-            const shadowAlpha = (1 - scaleX) * 0.45;
-            ctx.fillStyle = `rgba(0,0,0,${shadowAlpha})`;
+            ctx.fillStyle = `rgba(0,0,0,${(1 - scaleX) * 0.45})`;
             ctx.fillRect(drawX, 0, drawW, height);
             ctx.restore();
             break;
           }
-
           case 'circle-reveal': {
             const p = easeInOutCubic(rawTrans);
             const maxR = Math.hypot(width / 2, height / 2) * 1.05;
@@ -1095,7 +1239,6 @@ export function renderFrame(
             ctx.restore();
             break;
           }
-
           case 'diamond-reveal': {
             const p = easeInOutCubic(rawTrans);
             const rx = width * 1.05 * p;
@@ -1113,7 +1256,6 @@ export function renderFrame(
             ctx.restore();
             break;
           }
-
           case 'glitch-cut': {
             const base = rawTrans < 0.5 ? outCanvas : inCanvas;
             ctx.drawImage(base, 0, 0);
@@ -1122,8 +1264,10 @@ export function renderFrame(
             const intensity = Math.sin(rawTrans * Math.PI);
             for (let s = 0; s < slices; s++) {
               const dir = s % 2 === 0 ? 1 : -1;
-              const shift = dir * intensity * width * (0.04 + ((s * 3) % 5) * 0.015);
-              const src = (s + Math.floor(rawTrans * 7)) % 2 === 0 ? inCanvas : outCanvas;
+              const shift =
+                dir * intensity * width * (0.04 + ((s * 3) % 5) * 0.015);
+              const src =
+                (s + Math.floor(rawTrans * 7)) % 2 === 0 ? inCanvas : outCanvas;
               ctx.drawImage(
                 src,
                 0,
@@ -1144,7 +1288,6 @@ export function renderFrame(
             }
             break;
           }
-
           case 'zoom-through': {
             const p = easeInOutQuart(rawTrans);
             if (p < 0.62) {
@@ -1169,7 +1312,6 @@ export function renderFrame(
             }
             break;
           }
-
           case 'flash-strobe': {
             const base = rawTrans < 0.4 ? outCanvas : inCanvas;
             ctx.drawImage(base, 0, 0);
@@ -1190,7 +1332,6 @@ export function renderFrame(
     }
   }
 
-  // Global overlays (particles, vignette, wedding inner border, cinema matte)
   drawGlobalOverlays(
     ctx,
     width,
@@ -1202,7 +1343,6 @@ export function renderFrame(
     aspectRatio
   );
 
-  // Intro Title Card Overlay
   if (intro.enabled && plan.introEnd > 0 && t <= plan.introEnd) {
     const introDur = plan.introEnd - plan.introStart;
     const progress = clamp(t / Math.max(0.01, introDur), 0, 1);
@@ -1214,10 +1354,13 @@ export function renderFrame(
     drawTitleCard(ctx, width, height, intro, progress, fadeAlpha, theme.accentHex);
   }
 
-  // Outro Card Overlay
   if (outro.enabled && plan.outroEnd > plan.outroStart && t >= plan.outroStart) {
     const outroDur = plan.outroEnd - plan.outroStart;
-    const progress = clamp((t - plan.outroStart) / Math.max(0.01, outroDur), 0, 1);
+    const progress = clamp(
+      (t - plan.outroStart) / Math.max(0.01, outroDur),
+      0,
+      1
+    );
     const fadeInSpan = Math.min(0.45, outroDur * 0.35);
     const fadeAlpha =
       t < plan.outroStart + fadeInSpan

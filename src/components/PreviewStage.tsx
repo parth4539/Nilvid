@@ -11,10 +11,9 @@ import {
   Upload,
 } from 'lucide-react';
 import { formatTimecode } from '../engine/exporter';
-import { renderFrame } from '../engine/renderer';
+import { renderFrame, syncTimelineVideos } from '../engine/renderer';
 import {
   AspectRatioId,
-  AudioTrackConfig,
   ColorGradeConfig,
   ParticleOverlayId,
   RenderPlan,
@@ -34,8 +33,8 @@ interface PreviewStageProps {
   particleOverlay: ParticleOverlayId;
   intro: TitleCardConfig;
   outro: TitleCardConfig;
-  audioTrack: AudioTrackConfig | null;
-  hasSlides: boolean;
+  audioClipsCount: number;
+  hasClips: boolean;
   onTogglePlay: () => void;
   onRestart: () => void;
   onSeek: (timeSec: number) => void;
@@ -64,8 +63,8 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
   particleOverlay,
   intro,
   outro,
-  audioTrack,
-  hasSlides,
+  audioClipsCount,
+  hasClips,
   onTogglePlay,
   onRestart,
   onSeek,
@@ -100,6 +99,7 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
       return;
     }
 
+    syncTimelineVideos(plan, currentTimeSec, isPlaying);
     renderFrame(
       ctx,
       canvas.width,
@@ -117,6 +117,7 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
     plan,
     themeId,
     currentTimeSec,
+    isPlaying,
     aspectRatio,
     colorGrade,
     particleOverlay,
@@ -151,8 +152,10 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
   }, [isScrubbing, durationSec]);
 
   const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(true);
+    if (e.dataTransfer.types.includes('Files')) {
+      e.preventDefault();
+      setIsDragOver(true);
+    }
   };
 
   const handleDragLeave = (e: React.DragEvent) => {
@@ -161,9 +164,9 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
   };
 
   const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(false);
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      e.preventDefault();
+      setIsDragOver(false);
       onFilesDropped(e.dataTransfer.files);
     }
   };
@@ -173,15 +176,15 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
 
   const stageBoxClass =
     aspectRatio === '16:9'
-      ? 'w-full aspect-video max-h-[540px]'
+      ? 'w-full aspect-video max-h-[470px]'
       : aspectRatio === '9:16'
-      ? 'h-[480px] sm:h-[540px] aspect-[9/16]'
-      : 'h-[420px] sm:h-[500px] aspect-square';
+      ? 'h-[420px] sm:h-[470px] aspect-[9/16]'
+      : 'h-[390px] sm:h-[450px] aspect-square';
 
   return (
     <section
       id="studio"
-      aria-label="Video Preview Stage"
+      aria-label="Program Video Preview"
       className="bg-[#0E1424] border border-slate-800/90 rounded-2xl overflow-hidden flex flex-col"
     >
       {/* Canvas Viewport Stage */}
@@ -189,11 +192,11 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        className={`relative bg-[#04070E] flex items-center justify-center p-3 sm:p-5 min-h-[320px] sm:min-h-[460px] transition-colors ${
+        className={`relative bg-[#04070E] flex items-center justify-center p-3 sm:p-4 min-h-[300px] sm:min-h-[420px] transition-colors ${
           isDragOver ? 'ring-2 ring-inset ring-[#38BDF8] bg-slate-900/60' : ''
         }`}
       >
-        {hasSlides ? (
+        {hasClips ? (
           <div
             className={`relative ${stageBoxClass} mx-auto rounded-lg overflow-hidden bg-black shadow-2xl ring-1 ring-sky-400/15 flex items-center justify-center`}
           >
@@ -203,7 +206,7 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
               height={previewDims.height}
               onClick={onTogglePlay}
               className="w-full h-full object-contain cursor-pointer block"
-              aria-label="Live slideshow animation preview canvas"
+              aria-label="Live timeline animation preview canvas"
             />
 
             {isExporting && (
@@ -219,27 +222,27 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
             )}
           </div>
         ) : (
-          <div className="w-full max-w-md py-16 px-6 text-center flex flex-col items-center justify-center gap-4">
+          <div className="w-full max-w-md py-14 px-6 text-center flex flex-col items-center justify-center gap-4">
             <div className="w-12 h-12 rounded-xl bg-[#090E1B] border border-slate-800 flex items-center justify-center text-sky-400">
               <ImagePlus className="w-6 h-6" aria-hidden="true" />
             </div>
             <div className="space-y-1.5">
               <h2 className="font-display text-lg font-semibold text-slate-100">
-                Drop photos here to start
+                Drop photos, videos, or songs to start
               </h2>
               <p className="text-sm text-slate-400 leading-relaxed">
-                Upload multiple JPG, PNG, or WebP images. Everything animates and
-                renders directly in your browser.
+                Cut video clips, animate photos, score individual song sections,
+                and export directly in your browser.
               </p>
             </div>
-            <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+            <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
               <button
                 type="button"
                 onClick={onOpenFilePicker}
                 className="inline-flex items-center gap-2 px-4 py-2.5 min-h-[42px] rounded-lg bg-[#2563EB] text-white text-sm font-semibold hover:bg-[#1D4ED8] transition-colors cursor-pointer whitespace-nowrap"
               >
                 <Upload className="w-4 h-4" aria-hidden="true" />
-                <span>Upload Photos</span>
+                <span>Import Media</span>
               </button>
               <button
                 type="button"
@@ -256,30 +259,29 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
         {isDragOver && (
           <div className="absolute inset-0 bg-[#070A12]/80 backdrop-blur-[2px] flex items-center justify-center pointer-events-none">
             <div className="px-5 py-3 rounded-xl bg-[#0E1424] border border-[#38BDF8] text-slate-100 text-sm font-medium">
-              Drop images to add them to your sequence
+              Drop images, videos, or songs to add to timeline
             </div>
           </div>
         )}
       </div>
 
-      {/* Transport & Multi-Track Scrubber Bar */}
-      <div className="border-t border-slate-800/90 px-4 sm:px-5 py-3.5 bg-[#0E1424] flex flex-col gap-3">
-        {/* Interactive Timeline Scrubber */}
+      {/* Transport & Scrubber Bar */}
+      <div className="border-t border-slate-800/90 px-4 py-3 bg-[#0E1424] flex flex-col gap-2.5">
         <div
           ref={scrubberRef}
           role="slider"
-          tabIndex={hasSlides ? 0 : -1}
-          aria-label="Timeline scrubber"
+          tabIndex={hasClips ? 0 : -1}
+          aria-label="Program timeline scrubber"
           aria-valuemin={0}
           aria-valuemax={durationSec}
           aria-valuenow={Number(currentTimeSec.toFixed(1))}
           onPointerDown={(e) => {
-            if (!hasSlides || isExporting) return;
+            if (!hasClips || isExporting) return;
             setIsScrubbing(true);
             onSeek(computeTimeFromPointer(e.clientX));
           }}
           onKeyDown={(e) => {
-            if (!hasSlides || isExporting) return;
+            if (!hasClips || isExporting) return;
             if (e.key === 'ArrowRight') {
               e.preventDefault();
               onSeek(Math.min(durationSec, currentTimeSec + 0.5));
@@ -288,26 +290,11 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
               onSeek(Math.max(0, currentTimeSec - 0.5));
             }
           }}
-          className={`relative h-6 flex items-center group ${
-            hasSlides && !isExporting ? 'cursor-pointer' : 'opacity-40 pointer-events-none'
+          className={`relative h-5 flex items-center group ${
+            hasClips && !isExporting ? 'cursor-pointer' : 'opacity-40 pointer-events-none'
           }`}
         >
-          <div className="relative w-full h-2 rounded-full bg-slate-800 overflow-hidden">
-            {intro.enabled && plan.introEnd > 0 && (
-              <div
-                className="absolute inset-y-0 left-0 bg-slate-600/70"
-                style={{ width: `${(plan.introEnd / durationSec) * 100}%` }}
-              />
-            )}
-            {outro.enabled && plan.outroEnd > plan.outroStart && (
-              <div
-                className="absolute inset-y-0 right-0 bg-slate-600/70"
-                style={{
-                  width: `${((plan.outroEnd - plan.outroStart) / durationSec) * 100}%`,
-                }}
-              />
-            )}
-            {/* Active Playhead Progress */}
+          <div className="relative w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
             <div
               className="absolute inset-y-0 left-0 bg-gradient-to-r from-[#2563EB] to-[#38BDF8]"
               style={{ width: `${progressPct}%` }}
@@ -316,29 +303,27 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
               const leftPct = (item.startTime / durationSec) * 100;
               return (
                 <div
-                  key={item.slide.id}
+                  key={item.clip.id}
                   className="absolute inset-y-0 w-[2px] bg-[#070A12]/90"
                   style={{ left: `${leftPct}%` }}
                 />
               );
             })}
           </div>
-          {/* Playhead Thumb */}
           <div
             className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full bg-[#38BDF8] ring-2 ring-[#070A12] transition-transform group-hover:scale-125 pointer-events-none"
             style={{ left: `${progressPct}%` }}
           />
         </div>
 
-        {/* Transport Controls Row */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={onTogglePlay}
-              disabled={!hasSlides || isExporting}
+              disabled={!hasClips || isExporting}
               aria-label={isPlaying ? 'Pause preview' : 'Play preview'}
-              className="inline-flex items-center justify-center gap-2 px-3.5 py-2 min-h-[40px] rounded-lg bg-[#2563EB] text-white text-sm font-semibold hover:bg-[#1D4ED8] disabled:opacity-40 disabled:pointer-events-none transition-colors cursor-pointer whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#38BDF8]"
+              className="inline-flex items-center justify-center gap-2 px-3.5 py-2 min-h-[38px] rounded-lg bg-[#2563EB] text-white text-sm font-semibold hover:bg-[#1D4ED8] disabled:opacity-40 disabled:pointer-events-none transition-colors cursor-pointer whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#38BDF8]"
             >
               {isPlaying ? (
                 <>
@@ -356,9 +341,9 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
             <button
               type="button"
               onClick={onRestart}
-              disabled={!hasSlides || isExporting}
+              disabled={!hasClips || isExporting}
               aria-label="Restart preview from beginning"
-              className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-[#090E1B] border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-40 disabled:pointer-events-none transition-colors cursor-pointer shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#38BDF8]"
+              className="inline-flex items-center justify-center w-9 h-9 rounded-lg bg-[#090E1B] border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-40 disabled:pointer-events-none transition-colors cursor-pointer shrink-0"
             >
               <RotateCcw className="w-4 h-4" aria-hidden="true" />
             </button>
@@ -367,18 +352,18 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
               <button
                 type="button"
                 onClick={() => onSeek(Math.max(0, currentTimeSec - 0.5))}
-                disabled={!hasSlides || isExporting}
+                disabled={!hasClips || isExporting}
                 aria-label="Step back half a second"
-                className="inline-flex items-center justify-center w-8 h-10 rounded-lg bg-[#090E1B] border border-slate-800 text-slate-400 hover:text-white disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
+                className="inline-flex items-center justify-center w-8 h-9 rounded-lg bg-[#090E1B] border border-slate-800 text-slate-400 hover:text-white disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
               >
                 <ChevronLeft className="w-4 h-4" aria-hidden="true" />
               </button>
               <button
                 type="button"
                 onClick={() => onSeek(Math.min(durationSec, currentTimeSec + 0.5))}
-                disabled={!hasSlides || isExporting}
+                disabled={!hasClips || isExporting}
                 aria-label="Step forward half a second"
-                className="inline-flex items-center justify-center w-8 h-10 rounded-lg bg-[#090E1B] border border-slate-800 text-slate-400 hover:text-white disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
+                className="inline-flex items-center justify-center w-8 h-9 rounded-lg bg-[#090E1B] border border-slate-800 text-slate-400 hover:text-white disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
               >
                 <ChevronRight className="w-4 h-4" aria-hidden="true" />
               </button>
@@ -390,15 +375,16 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
               <span className="text-slate-400">{formatTimecode(durationSec)}</span>
             </div>
 
-            {audioTrack && (
-              <div className="hidden xl:flex items-center gap-1.5 pl-2 text-xs text-slate-400 max-w-[160px] truncate">
+            {audioClipsCount > 0 && (
+              <div className="hidden xl:flex items-center gap-1.5 pl-2 text-xs text-slate-400">
                 <Music className="w-3.5 h-3.5 text-[#38BDF8] shrink-0" aria-hidden="true" />
-                <span className="truncate">{audioTrack.fileName}</span>
+                <span>
+                  {audioClipsCount} {audioClipsCount === 1 ? 'song' : 'songs'}
+                </span>
               </div>
             )}
           </div>
 
-          {/* Aspect Ratio Segmented Control */}
           <div
             role="group"
             aria-label="Video aspect ratio"
@@ -412,7 +398,7 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
                   type="button"
                   disabled={isExporting}
                   onClick={() => onAspectRatioChange(option.id)}
-                  className={`px-3 py-1.5 min-h-[32px] rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 ${
+                  className={`px-3 py-1 min-h-[30px] rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 ${
                     active
                       ? 'bg-[#172554] text-sky-200 border border-sky-500/30'
                       : 'text-slate-400 hover:text-slate-200'

@@ -1,6 +1,30 @@
-import { AudioTrackConfig } from '../types/studio';
+import { AudioClip } from '../types/studio';
 
-export async function decodeAudioTrack(file: File): Promise<AudioTrackConfig> {
+export function extractWaveformPeaks(
+  buffer: AudioBuffer,
+  buckets = 64
+): number[] {
+  const channel = buffer.getChannelData(0);
+  const blockSize = Math.max(1, Math.floor(channel.length / buckets));
+  const peaks: number[] = [];
+
+  for (let i = 0; i < buckets; i++) {
+    const start = i * blockSize;
+    const end = Math.min(channel.length, start + blockSize);
+    let maxVal = 0;
+    const step = Math.max(1, Math.floor((end - start) / 40));
+    for (let j = start; j < end; j += step) {
+      const abs = Math.abs(channel[j]);
+      if (abs > maxVal) maxVal = abs;
+    }
+    peaks.push(Math.min(1, Math.max(0.08, maxVal)));
+  }
+  return peaks;
+}
+
+export async function decodeAudioBufferFromFile(
+  file: File
+): Promise<AudioBuffer> {
   const AudioCtx =
     window.AudioContext ||
     (window as unknown as { webkitAudioContext: typeof AudioContext })
@@ -13,37 +37,29 @@ export async function decodeAudioTrack(file: File): Promise<AudioTrackConfig> {
   const ctx = new AudioCtx();
   try {
     const arrayBuffer = await file.arrayBuffer();
-    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-    const url = URL.createObjectURL(file);
-
-    return {
-      fileName: file.name,
-      url,
-      buffer: audioBuffer,
-      durationSec: audioBuffer.duration,
-      volume: 0.75,
-      fadeInSec: 1.5,
-      fadeOutSec: 2.0,
-    };
+    return await ctx.decodeAudioData(arrayBuffer);
   } finally {
     await ctx.close().catch(() => {});
   }
 }
 
-export function computeAudioGainAtTime(
-  currentTimeSec: number,
-  totalDurationSec: number,
-  volume: number,
-  fadeInSec: number,
-  fadeOutSec: number
+export function computeAudioClipGain(
+  clip: AudioClip,
+  timelineTimeSec: number
 ): number {
-  let gain = volume;
-  if (fadeInSec > 0.05 && currentTimeSec < fadeInSec) {
-    gain *= Math.max(0, Math.min(1, currentTimeSec / fadeInSec));
+  const localT = timelineTimeSec - clip.startTime;
+  if (localT < 0 || localT > clip.durationSec) return 0;
+
+  let gain = clip.volume;
+  const fadeIn = Math.min(clip.fadeInSec, clip.durationSec * 0.48);
+  const fadeOut = Math.min(clip.fadeOutSec, clip.durationSec * 0.48);
+
+  if (fadeIn > 0.05 && localT < fadeIn) {
+    gain *= Math.max(0, Math.min(1, localT / fadeIn));
   }
-  const timeRemaining = totalDurationSec - currentTimeSec;
-  if (fadeOutSec > 0.05 && timeRemaining < fadeOutSec) {
-    gain *= Math.max(0, Math.min(1, timeRemaining / fadeOutSec));
+  const remaining = clip.durationSec - localT;
+  if (fadeOut > 0.05 && remaining < fadeOut) {
+    gain *= Math.max(0, Math.min(1, remaining / fadeOut));
   }
   return Math.max(0, Math.min(1, gain));
 }
