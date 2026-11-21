@@ -1,0 +1,6 @@
+{
+  "name": "Framecut",
+  "description": "Browser-based photo-to-video slideshow studio with themed motion presets, real-time canvas preview, and local MediaRecorder export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
