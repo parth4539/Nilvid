@@ -30,6 +30,7 @@ import {
   AspectRatioId,
   AudioClip,
   ColorGradeConfig,
+  ExportFormat,
   ExportResolution,
   ExportResult,
   ExportStatus,
@@ -85,6 +86,7 @@ export default function App() {
   const [themeId, setThemeId] = useState<ThemeId>('cinematic');
   const [aspectRatio, setAspectRatio] = useState<AspectRatioId>('16:9');
   const [resolution, setResolution] = useState<ExportResolution>('1080p');
+  const [exportFormat, setExportFormat] = useState<ExportFormat>('mp4');
 
   const [colorGrade, setColorGrade] =
     useState<ColorGradeConfig>(DEFAULT_COLOR_GRADE);
@@ -890,6 +892,7 @@ export default function App() {
         themeId,
         aspectRatio,
         resolution,
+        format: exportFormat,
         colorGrade,
         particleOverlay,
         intro,
@@ -934,6 +937,7 @@ export default function App() {
     themeId,
     aspectRatio,
     resolution,
+    exportFormat,
     colorGrade,
     particleOverlay,
     intro,
@@ -988,6 +992,7 @@ export default function App() {
       <Header
         canExport={hasContent}
         isExporting={isExporting}
+        exportFormat={exportFormat}
         onExportClick={handleStartExport}
         onNavigateTab={(tab) => setActiveTab(tab)}
       />
@@ -1043,6 +1048,7 @@ export default function App() {
             clipCount={clips.length}
             audioClipsCount={audioClips.length}
             resolution={resolution}
+            exportFormat={exportFormat}
             selection={selection}
             selectedVideoClip={selectedVideoClip}
             selectedScheduleItem={selectedScheduleItem}
@@ -1064,6 +1070,10 @@ export default function App() {
             onFitTotalDuration={handleFitTotalDuration}
             onResolutionChange={(res) => {
               setResolution(res);
+              setExportStatus('idle');
+            }}
+            onFormatChange={(fmt) => {
+              setExportFormat(fmt);
               setExportStatus('idle');
             }}
             onUpdateVideoClip={handleUpdateVideoClip}

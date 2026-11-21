@@ -985,6 +985,66 @@ export function syncTimelineVideos(
   }
 }
 
+export async function seekTimelineVideosExact(
+  plan: RenderPlan,
+  currentTimeSec: number
+): Promise<void> {
+  const seekPromises: Promise<void>[] = [];
+
+  for (let i = 0; i < plan.schedule.length; i++) {
+    const item = plan.schedule[i];
+    const clip = item.clip;
+    if (clip.kind !== 'video' || !clip.videoElement) continue;
+    const videoEl = clip.videoElement;
+
+    if (!videoEl.paused) {
+      videoEl.pause();
+    }
+
+    const isActive =
+      currentTimeSec >= item.startTime - 0.05 &&
+      currentTimeSec <= item.endTime + 0.05;
+    if (!isActive) continue;
+
+    const rate = clamp(clip.speed, 0.25, 4.0);
+    const localElapsed = Math.max(0, currentTimeSec - item.startTime);
+    const maxSource = Math.max(0.05, clip.sourceDurationSec - 0.04);
+    const targetSourceTime = clamp(
+      clip.sourceStartSec + localElapsed * rate,
+      0,
+      maxSource
+    );
+
+    if (Math.abs(videoEl.currentTime - targetSourceTime) <= 0.015) {
+      continue;
+    }
+
+    seekPromises.push(
+      new Promise<void>((resolve) => {
+        let settled = false;
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          videoEl.removeEventListener('seeked', done);
+          window.clearTimeout(timer);
+          resolve();
+        };
+        const timer = window.setTimeout(done, 250);
+        videoEl.addEventListener('seeked', done, { once: true });
+        try {
+          videoEl.currentTime = targetSourceTime;
+        } catch {
+          done();
+        }
+      })
+    );
+  }
+
+  if (seekPromises.length > 0) {
+    await Promise.all(seekPromises);
+  }
+}
+
 export function renderFrame(
   ctx: CanvasRenderingContext2D,
   width: number,

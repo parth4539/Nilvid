@@ -30,6 +30,7 @@ import {
   ClipScheduleItem,
   ColorFilterId,
   ColorGradeConfig,
+  ExportFormat,
   ExportResolution,
   ExportResult,
   ExportStatus,
@@ -51,6 +52,7 @@ interface StudioControlsProps {
   clipCount: number;
   audioClipsCount: number;
   resolution: ExportResolution;
+  exportFormat: ExportFormat;
   selection: SelectionTarget;
   selectedVideoClip: TimelineClip | null;
   selectedScheduleItem: ClipScheduleItem | null;
@@ -68,6 +70,7 @@ interface StudioControlsProps {
   onSelectTheme: (theme: ThemeId) => void;
   onFitTotalDuration: (targetSeconds: number) => void;
   onResolutionChange: (res: ExportResolution) => void;
+  onFormatChange: (fmt: ExportFormat) => void;
   onUpdateVideoClip: (clipId: string, patch: Partial<TimelineClip>) => void;
   onUpdateAudioClip: (audioClipId: string, patch: Partial<AudioClip>) => void;
   onDeleteAudioClip: (audioClipId: string) => void;
@@ -150,6 +153,7 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
   clipCount,
   audioClipsCount,
   resolution,
+  exportFormat,
   selection,
   selectedVideoClip,
   selectedScheduleItem,
@@ -167,6 +171,7 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
   onSelectTheme,
   onFitTotalDuration,
   onResolutionChange,
+  onFormatChange,
   onUpdateVideoClip,
   onUpdateAudioClip,
   onDeleteAudioClip,
@@ -1351,34 +1356,61 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
         id="export"
         className="border-t border-slate-800/90 p-4 sm:p-5 bg-[#0A0F1D] space-y-3"
       >
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
           <h2 className="font-display text-sm font-semibold text-slate-100">
             Render & Download
           </h2>
 
-          <div
-            role="group"
-            aria-label="Export resolution"
-            className="inline-flex items-center p-0.5 rounded-lg bg-[#070A12] border border-slate-800"
-          >
-            {(['720p', '1080p'] as ExportResolution[]).map((res) => {
-              const active = resolution === res;
-              return (
-                <button
-                  key={res}
-                  type="button"
-                  disabled={isExporting}
-                  onClick={() => onResolutionChange(res)}
-                  className={`px-2.5 py-1 min-h-[28px] rounded-md font-mono text-xs transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50 ${
-                    active
-                      ? 'bg-[#172554] text-sky-100'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  {res}
-                </button>
-              );
-            })}
+          <div className="flex items-center gap-1.5">
+            <div
+              role="group"
+              aria-label="Export file format"
+              className="inline-flex items-center p-0.5 rounded-lg bg-[#070A12] border border-slate-800"
+            >
+              {(['mp4', 'mov', 'webm'] as ExportFormat[]).map((fmt) => {
+                const active = exportFormat === fmt;
+                return (
+                  <button
+                    key={fmt}
+                    type="button"
+                    disabled={isExporting}
+                    onClick={() => onFormatChange(fmt)}
+                    className={`px-2 py-1 min-h-[28px] rounded-md font-mono text-[11px] uppercase transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50 ${
+                      active
+                        ? 'bg-[#172554] text-sky-100'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {fmt}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div
+              role="group"
+              aria-label="Export resolution"
+              className="inline-flex items-center p-0.5 rounded-lg bg-[#070A12] border border-slate-800"
+            >
+              {(['720p', '1080p'] as ExportResolution[]).map((res) => {
+                const active = resolution === res;
+                return (
+                  <button
+                    key={res}
+                    type="button"
+                    disabled={isExporting}
+                    onClick={() => onResolutionChange(res)}
+                    className={`px-2 py-1 min-h-[28px] rounded-md font-mono text-[11px] transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50 ${
+                      active
+                        ? 'bg-[#172554] text-sky-100'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {res}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
 
@@ -1386,7 +1418,7 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
           <div className="p-3.5 rounded-xl bg-[#070A12] border border-slate-800 space-y-2.5">
             <div className="flex items-center justify-between text-xs">
               <span className="font-medium text-slate-200">
-                Recording frames in browser...
+                Encoding {exportFormat.toUpperCase()} in browser...
               </span>
               <span className="font-mono text-[#38BDF8]">
                 {Math.round(exportProgressPct)}%
@@ -1422,7 +1454,9 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
             className="w-full inline-flex items-center justify-center gap-2 py-3 px-4 min-h-[44px] rounded-xl bg-[#2563EB] text-white text-sm font-semibold hover:bg-[#1D4ED8] active:scale-[0.99] disabled:opacity-40 disabled:pointer-events-none transition-all cursor-pointer whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#38BDF8]"
           >
             <Film className="w-4 h-4" aria-hidden="true" />
-            <span>Export Video ({totalDurationSec.toFixed(1)}s)</span>
+            <span>
+              Export {exportFormat.toUpperCase()} ({totalDurationSec.toFixed(1)}s)
+            </span>
           </button>
         )}
 
@@ -1452,6 +1486,7 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
                 </p>
                 <p className="text-xs text-slate-400 font-mono mt-0.5">
                   {exportResult.width}×{exportResult.height} ·{' '}
+                  {exportResult.format.toUpperCase()} ·{' '}
                   {formatBytes(exportResult.sizeBytes)}
                   {exportResult.hasAudio ? ' · Audio' : ''}
                 </p>

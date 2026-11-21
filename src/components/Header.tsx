@@ -1,11 +1,12 @@
 import React from 'react';
 import { Download } from 'lucide-react';
-import { InspectorTab } from '../types/studio';
+import { ExportFormat, InspectorTab } from '../types/studio';
 import { NilvidLogo } from './NilvidLogo';
 
 interface HeaderProps {
   canExport: boolean;
   isExporting: boolean;
+  exportFormat: ExportFormat;
   onExportClick: () => void;
   onNavigateTab: (tab: InspectorTab) => void;
 }
@@ -13,6 +14,7 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   canExport,
   isExporting,
+  exportFormat,
   onExportClick,
   onNavigateTab,
 }) => {
@@ -78,7 +80,11 @@ export const Header: React.FC<HeaderProps> = ({
             className="inline-flex items-center gap-2 px-4 py-2 min-h-[40px] rounded-lg bg-[#2563EB] text-white text-sm font-semibold hover:bg-[#1D4ED8] active:scale-[0.98] disabled:opacity-45 disabled:pointer-events-none transition-all whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#38BDF8] focus-visible:ring-offset-2 focus-visible:ring-offset-[#070A12]"
           >
             <Download className="w-4 h-4" aria-hidden="true" />
-            <span>{isExporting ? 'Exporting...' : 'Export Video'}</span>
+            <span>
+              {isExporting
+                ? 'Exporting...'
+                : `Export ${exportFormat.toUpperCase()}`}
+            </span>
           </button>
         </div>
       </div>

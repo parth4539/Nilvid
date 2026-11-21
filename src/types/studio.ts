@@ -4,6 +4,8 @@ export type AspectRatioId = '16:9' | '9:16' | '1:1';
 
 export type ExportResolution = '720p' | '1080p';
 
+export type ExportFormat = 'mp4' | 'mov' | 'webm';
+
 export type MediaKind = 'image' | 'video' | 'audio';
 
 export type AnimationId =
@@ -203,6 +205,7 @@ export type SelectionTarget =
 export interface ExportResult {
   blobUrl: string;
   filename: string;
+  format: ExportFormat;
   mimeType: string;
   sizeBytes: number;
   durationSec: number;
