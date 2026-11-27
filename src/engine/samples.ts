@@ -223,12 +223,35 @@ export async function filesToMediaAssets(
   return assets;
 }
 
-export function createTimelineClipFromAsset(asset: MediaAsset): TimelineClip {
+export interface CreateClipOptions {
+  trackId?: string;
+  startTime?: number;
+}
+
+export function createTimelineClipFromAsset(
+  asset: MediaAsset,
+  options: CreateClipOptions = {}
+): TimelineClip {
+  const trackId = options.trackId ?? 'v1';
+  const isOverlayTrack = trackId !== 'v1';
+  const overlayDefaults = isOverlayTrack
+    ? {
+        layoutPreset: 'pip-tr' as const,
+        layerScale: 0.42,
+        layerX: 0.25,
+        layerY: -0.22,
+        layerOpacity: 1,
+        blendMode: 'source-over' as const,
+      }
+    : {};
+
   if (asset.kind === 'video') {
     const videoEl = createVideoElement(asset.url);
     return {
       id: `clip-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       assetId: asset.id,
+      trackId,
+      startTime: options.startTime,
       kind: 'video',
       name: asset.name,
       url: asset.url,
@@ -244,12 +267,15 @@ export function createTimelineClipFromAsset(asset: MediaAsset): TimelineClip {
       motionSpeed: 1,
       volume: 0.85,
       muted: false,
+      ...overlayDefaults,
     };
   }
 
   return {
     id: `clip-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     assetId: asset.id,
+    trackId,
+    startTime: options.startTime,
     kind: 'image',
     name: asset.name,
     url: asset.url,
@@ -264,6 +290,7 @@ export function createTimelineClipFromAsset(asset: MediaAsset): TimelineClip {
     motionSpeed: 1,
     volume: 1,
     muted: true,
+    ...overlayDefaults,
   };
 }
 
@@ -277,12 +304,14 @@ export function cloneTimelineClip(clip: TimelineClip): TimelineClip {
 
 export function createAudioClipFromAsset(
   asset: MediaAsset,
-  startTime: number
+  startTime: number,
+  trackId = 'a1'
 ): AudioClip | null {
   if (asset.kind !== 'audio' || !asset.audioBuffer) return null;
   return {
     id: `audioclip-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     assetId: asset.id,
+    trackId,
     name: asset.name,
     buffer: asset.audioBuffer,
     waveformPeaks: asset.waveformPeaks ?? extractWaveformPeaks(asset.audioBuffer, 64),

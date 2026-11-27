@@ -11,10 +11,16 @@ import {
   SelectionTarget,
   ThemeId,
   TimelineClip,
+  TimelineTrack,
   TitleCardConfig,
 } from '../types/studio';
 import { decodeAudioBufferFromFile, extractWaveformPeaks } from './audio';
 import { createVideoElement, loadImageElement } from './samples';
+
+export const DEFAULT_TRACKS: TimelineTrack[] = [
+  { id: 'v1', kind: 'video', label: 'Track V1', muted: false, hidden: false },
+  { id: 'a1', kind: 'audio', label: 'Track A1', muted: false },
+];
 
 const DB_NAME = 'nilvid-studio-db';
 const DB_VERSION = 1;
@@ -47,6 +53,7 @@ export interface PersistedProjectPayload {
   version: 1;
   savedAt: number;
   binAssetIds: string[];
+  tracks?: TimelineTrack[];
   clips: PersistedTimelineClip[];
   audioClips: PersistedAudioClip[];
   selection: SelectionTarget;
@@ -64,6 +71,7 @@ export interface PersistedProjectPayload {
 
 export interface HydratedProjectResult {
   assets: MediaAsset[];
+  tracks: TimelineTrack[];
   clips: TimelineClip[];
   audioClips: AudioClip[];
   selection: SelectionTarget;
@@ -131,6 +139,7 @@ function serializeAudioClip(clip: AudioClip): PersistedAudioClip {
 
 export interface SaveProjectInput {
   assets: MediaAsset[];
+  tracks: TimelineTrack[];
   clips: TimelineClip[];
   audioClips: AudioClip[];
   selection: SelectionTarget;
@@ -205,6 +214,7 @@ export async function savePersistedProject(
       version: 1,
       savedAt: Date.now(),
       binAssetIds: input.assets.map((a) => a.id),
+      tracks: input.tracks,
       clips: input.clips.map(serializeClip),
       audioClips: input.audioClips.map(serializeAudioClip),
       selection: input.selection,
@@ -400,9 +410,11 @@ export async function loadPersistedProject(): Promise<HydratedProjectResult | nu
     for (const pClip of payload.clips) {
       const asset = hydratedMap.get(pClip.assetId);
       if (!asset) continue;
+      const trackId = pClip.trackId || 'v1';
       if (pClip.kind === 'video') {
         clips.push({
           ...pClip,
+          trackId,
           url: asset.url,
           thumbnailUrl: asset.thumbnailUrl,
           videoElement: createVideoElement(asset.url),
@@ -411,6 +423,7 @@ export async function loadPersistedProject(): Promise<HydratedProjectResult | nu
       } else if (asset.imageElement) {
         clips.push({
           ...pClip,
+          trackId,
           url: asset.url,
           thumbnailUrl: asset.thumbnailUrl,
           imageElement: asset.imageElement,
@@ -424,12 +437,47 @@ export async function loadPersistedProject(): Promise<HydratedProjectResult | nu
       if (!asset || !asset.audioBuffer) continue;
       audioClips.push({
         ...pAudio,
+        trackId: pAudio.trackId || 'a1',
         buffer: asset.audioBuffer,
       });
     }
 
+    const tracks: TimelineTrack[] =
+      payload.tracks && payload.tracks.length > 0
+        ? payload.tracks.map((t) => ({ ...t }))
+        : DEFAULT_TRACKS.map((t) => ({ ...t }));
+
+    if (!tracks.some((t) => t.id === 'v1')) {
+      tracks.unshift({ ...DEFAULT_TRACKS[0] });
+    }
+    if (!tracks.some((t) => t.id === 'a1')) {
+      tracks.push({ ...DEFAULT_TRACKS[1] });
+    }
+    for (const c of clips) {
+      if (!tracks.some((t) => t.id === c.trackId)) {
+        tracks.push({
+          id: c.trackId,
+          kind: 'video',
+          label: `Track ${c.trackId.toUpperCase()}`,
+          muted: false,
+          hidden: false,
+        });
+      }
+    }
+    for (const a of audioClips) {
+      if (!tracks.some((t) => t.id === a.trackId)) {
+        tracks.push({
+          id: a.trackId,
+          kind: 'audio',
+          label: `Track ${a.trackId.toUpperCase()}`,
+          muted: false,
+        });
+      }
+    }
+
     return {
       assets,
+      tracks,
       clips,
       audioClips,
       selection: payload.selection,

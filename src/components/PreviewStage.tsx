@@ -18,11 +18,13 @@ import {
   ParticleOverlayId,
   RenderPlan,
   ThemeId,
+  TimelineTrack,
   TitleCardConfig,
 } from '../types/studio';
 
 interface PreviewStageProps {
   plan: RenderPlan;
+  tracks?: TimelineTrack[];
   themeId: ThemeId;
   currentTimeSec: number;
   isPlaying: boolean;
@@ -53,6 +55,7 @@ const ASPECT_OPTIONS: { id: AspectRatioId; label: string }[] = [
 
 export const PreviewStage: React.FC<PreviewStageProps> = ({
   plan,
+  tracks,
   themeId,
   currentTimeSec,
   isPlaying,
@@ -113,13 +116,14 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
         colorGrade,
         particleOverlay,
         intro,
-        outro
+        outro,
+        tracks
       );
     };
     drawCurrent();
 
     const pendingVideos: HTMLVideoElement[] = [];
-    for (const item of plan.schedule) {
+    for (const item of Object.values(plan.trackSchedules).flat()) {
       if (
         item.clip.kind === 'video' &&
         item.clip.videoElement &&
@@ -146,6 +150,7 @@ export const PreviewStage: React.FC<PreviewStageProps> = ({
     }
   }, [
     plan,
+    tracks,
     themeId,
     currentTimeSec,
     isPlaying,

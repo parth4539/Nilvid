@@ -9,6 +9,7 @@ import {
   TextAnimationId,
   ThemeId,
   TimelineClip,
+  TimelineTrack,
   TitleCardConfig,
 } from '../types/studio';
 import { buildCompositeFilterString } from './catalog';
@@ -17,6 +18,7 @@ import { THEMES } from './themes';
 let cachedGrainCanvas: HTMLCanvasElement | null = null;
 let bufOut: HTMLCanvasElement | null = null;
 let bufIn: HTMLCanvasElement | null = null;
+let bufLayer: HTMLCanvasElement | null = null;
 
 function getGrainPatternCanvas(): HTMLCanvasElement {
   if (cachedGrainCanvas) return cachedGrainCanvas;
@@ -57,6 +59,19 @@ function getTransitionBuffers(
     bufIn.height = height;
   }
   return { outCanvas: bufOut, inCanvas: bufIn };
+}
+
+function getLayerBuffer(width: number, height: number): HTMLCanvasElement {
+  if (!bufLayer) bufLayer = document.createElement('canvas');
+  if (bufLayer.width !== width || bufLayer.height !== height) {
+    bufLayer.width = width;
+    bufLayer.height = height;
+  }
+  return bufLayer;
+}
+
+function getAllScheduleItems(plan: RenderPlan): ClipScheduleItem[] {
+  return Object.values(plan.trackSchedules).flat();
 }
 
 function clamp(val: number, min: number, max: number): number {
@@ -932,8 +947,9 @@ export function syncTimelineVideos(
   currentTimeSec: number,
   isPlaying: boolean
 ): void {
-  for (let i = 0; i < plan.schedule.length; i++) {
-    const item = plan.schedule[i];
+  const allItems = getAllScheduleItems(plan);
+  for (let i = 0; i < allItems.length; i++) {
+    const item = allItems[i];
     const clip = item.clip;
     if (clip.kind !== 'video' || !clip.videoElement) continue;
     const videoEl = clip.videoElement;
@@ -990,9 +1006,10 @@ export async function seekTimelineVideosExact(
   currentTimeSec: number
 ): Promise<void> {
   const seekPromises: Promise<void>[] = [];
+  const allItems = getAllScheduleItems(plan);
 
-  for (let i = 0; i < plan.schedule.length; i++) {
-    const item = plan.schedule[i];
+  for (let i = 0; i < allItems.length; i++) {
+    const item = allItems[i];
     const clip = item.clip;
     if (clip.kind !== 'video' || !clip.videoElement) continue;
     const videoEl = clip.videoElement;
@@ -1045,6 +1062,114 @@ export async function seekTimelineVideosExact(
   }
 }
 
+function compositeOverlayItem(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  item: ClipScheduleItem,
+  t: number,
+  themeId: ThemeId,
+  colorGrade: ColorGradeConfig
+) {
+  const clip = item.clip;
+  const dur = Math.max(0.01, item.endTime - item.startTime);
+  const fadeSpan = Math.min(0.28, dur * 0.15);
+  const fadeIn =
+    t - item.startTime < fadeSpan ? clamp((t - item.startTime) / fadeSpan, 0, 1) : 1;
+  const fadeOut =
+    item.endTime - t < fadeSpan ? clamp((item.endTime - t) / fadeSpan, 0, 1) : 1;
+  const baseOpacity = clamp(clip.layerOpacity ?? 1, 0.05, 1);
+  const effectiveAlpha = clamp(baseOpacity * Math.min(fadeIn, fadeOut), 0, 1);
+  if (effectiveAlpha <= 0.01) return;
+
+  const layerCanvas = getLayerBuffer(width, height);
+  const layerCtx = layerCanvas.getContext('2d', { alpha: false });
+  if (!layerCtx) return;
+
+  drawClipToContext(layerCtx, width, height, item, t, themeId, colorGrade);
+
+  const preset = clip.layoutPreset ?? 'full';
+  const blendMode = clip.blendMode ?? 'source-over';
+
+  ctx.save();
+  ctx.globalAlpha = effectiveAlpha;
+  ctx.globalCompositeOperation = blendMode;
+
+  if (preset === 'split-left' || preset === 'split-right') {
+    const halfW = width * 0.5;
+    const destX = preset === 'split-left' ? 0 : halfW;
+    ctx.beginPath();
+    ctx.rect(destX, 0, halfW, height);
+    ctx.clip();
+    ctx.drawImage(
+      layerCanvas,
+      width * 0.25,
+      0,
+      halfW,
+      height,
+      destX,
+      0,
+      halfW,
+      height
+    );
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.45)';
+    ctx.lineWidth = Math.max(2, Math.round(width * 0.002));
+    const lineX = preset === 'split-left' ? halfW - 1 : halfW + 1;
+    ctx.beginPath();
+    ctx.moveTo(lineX, 0);
+    ctx.lineTo(lineX, height);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  const isPipOrScaled =
+    preset !== 'full' || (clip.layerScale !== undefined && clip.layerScale < 0.99);
+
+  if (isPipOrScaled) {
+    const scale = clamp(clip.layerScale ?? 0.42, 0.18, 1);
+    const boxW = width * scale;
+    const boxH = height * scale;
+    const cx = width * (0.5 + (clip.layerX ?? 0));
+    const cy = height * (0.5 + (clip.layerY ?? 0));
+    const x = clamp(cx - boxW / 2, 0, Math.max(0, width - boxW));
+    const y = clamp(cy - boxH / 2, 0, Math.max(0, height - boxH));
+    const radius = Math.round(Math.min(boxW, boxH) * 0.045);
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
+    ctx.shadowBlur = Math.round(width * 0.022);
+    ctx.shadowOffsetY = Math.round(height * 0.01);
+    ctx.beginPath();
+    ctx.roundRect(x, y, boxW, boxH, radius);
+    ctx.fillStyle = 'rgba(0,0,0,0.9)';
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(x, y, boxW, boxH, radius);
+    ctx.clip();
+    ctx.drawImage(layerCanvas, 0, 0, width, height, x, y, boxW, boxH);
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = 'rgba(224, 242, 254, 0.38)';
+    ctx.lineWidth = Math.max(1.5, Math.round(width * 0.0018));
+    ctx.beginPath();
+    ctx.roundRect(x, y, boxW, boxH, radius);
+    ctx.stroke();
+    ctx.restore();
+  } else {
+    ctx.drawImage(layerCanvas, 0, 0);
+  }
+
+  ctx.restore();
+}
+
 export function renderFrame(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -1056,17 +1181,23 @@ export function renderFrame(
   colorGrade: ColorGradeConfig,
   particleOverlay: ParticleOverlayId,
   intro: TitleCardConfig,
-  outro: TitleCardConfig
+  outro: TitleCardConfig,
+  tracks?: TimelineTrack[]
 ): void {
   const theme = THEMES[themeId];
   const t = clamp(currentTimeSec, 0, plan.totalDuration);
+  const hiddenTrackIds = new Set(
+    (tracks ?? [])
+      .filter((tr) => tr.kind === 'video' && tr.hidden)
+      .map((tr) => tr.id)
+  );
 
   ctx.save();
   ctx.fillStyle = '#050506';
   ctx.fillRect(0, 0, width, height);
   ctx.restore();
 
-  if (plan.schedule.length > 0) {
+  if (plan.schedule.length > 0 && !hiddenTrackIds.has('v1')) {
     let outgoing: ClipScheduleItem | null = null;
     let incoming: ClipScheduleItem | null = null;
 
@@ -1388,6 +1519,35 @@ export function renderFrame(
             break;
           }
         }
+      }
+    }
+  }
+
+  // Composite parallel overlay video tracks (V2, V3, ...) in bottom-to-top track order
+  const orderedOverlayTrackIds: string[] = [];
+  if (tracks && tracks.length > 0) {
+    for (const tr of tracks) {
+      if (tr.kind === 'video' && tr.id !== 'v1' && !tr.hidden) {
+        orderedOverlayTrackIds.push(tr.id);
+      }
+    }
+  }
+  for (const tId of Object.keys(plan.trackSchedules)) {
+    if (
+      tId !== 'v1' &&
+      !hiddenTrackIds.has(tId) &&
+      !orderedOverlayTrackIds.includes(tId)
+    ) {
+      orderedOverlayTrackIds.push(tId);
+    }
+  }
+
+  for (const tId of orderedOverlayTrackIds) {
+    const items = plan.trackSchedules[tId];
+    if (!items || items.length === 0) continue;
+    for (const item of items) {
+      if (t >= item.startTime && t <= item.endTime) {
+        compositeOverlayItem(ctx, width, height, item, t, themeId, colorGrade);
       }
     }
   }

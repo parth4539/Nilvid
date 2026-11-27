@@ -19,6 +19,7 @@ import {
 } from './engine/exporter';
 import {
   clearPersistedProject,
+  DEFAULT_TRACKS,
   loadPersistedProject,
   savePersistedProject,
   SaveProjectInput,
@@ -46,6 +47,7 @@ import {
   SelectionTarget,
   ThemeId,
   TimelineClip,
+  TimelineTrack,
   TitleCardConfig,
   TransitionId,
 } from './types/studio';
@@ -84,6 +86,7 @@ interface ActiveAudioNode {
 
 export default function App() {
   const [assets, setAssets] = useState<MediaAsset[]>([]);
+  const [tracks, setTracks] = useState<TimelineTrack[]>(DEFAULT_TRACKS);
   const [clips, setClips] = useState<TimelineClip[]>([]);
   const [audioClips, setAudioClips] = useState<AudioClip[]>([]);
   const [selection, setSelection] = useState<SelectionTarget>(null);
@@ -122,6 +125,7 @@ export default function App() {
   const exportResultRef = useRef<ExportResult | null>(null);
   const audioClipsRef = useRef<AudioClip[]>([]);
   const clipsRef = useRef<TimelineClip[]>([]);
+  const tracksRef = useRef<TimelineTrack[]>(DEFAULT_TRACKS);
   const isHydratedRef = useRef<boolean>(false);
   const latestSnapshotRef = useRef<SaveProjectInput | null>(null);
   const saveTimerRef = useRef<number | null>(null);
@@ -134,6 +138,7 @@ export default function App() {
   exportResultRef.current = exportResult;
   audioClipsRef.current = audioClips;
   clipsRef.current = clips;
+  tracksRef.current = tracks;
 
   const plan = useMemo(
     () => buildRenderPlan(clips, themeId, intro, outro, audioClips),
@@ -162,6 +167,7 @@ export default function App() {
             ownedBlobUrlsRef.current.add(u)
           );
           setAssets(restored.assets);
+          setTracks(restored.tracks);
           setClips(restored.clips);
           setAudioClips(restored.audioClips);
           setSelection(restored.selection);
@@ -215,6 +221,7 @@ export default function App() {
   useEffect(() => {
     const snapshot: SaveProjectInput = {
       assets,
+      tracks,
       clips,
       audioClips,
       selection,
@@ -244,6 +251,7 @@ export default function App() {
     }, 80);
   }, [
     assets,
+    tracks,
     clips,
     audioClips,
     selection,
@@ -367,17 +375,23 @@ export default function App() {
         const wrappedOut = nextRaw >= plan.totalDuration;
         const wrapped = wrappedOut ? 0 : nextRaw;
 
-        // Real-time per-clip gain updates for fades on Track A1 & Track V1
+        // Real-time per-clip gain updates for fades across all audio & video tracks
+        const mutedTracks = new Set(
+          tracksRef.current.filter((tr) => tr.muted).map((tr) => tr.id)
+        );
+        const allScheduleItems = Object.values(plan.trackSchedules).flat();
         for (const node of activeAudioNodesRef.current) {
           if (node.kind === 'audio') {
             const aClip = audioClipsRef.current.find((a) => a.id === node.id);
-            node.gainNode.gain.value = aClip
-              ? computeAudioClipGain(aClip, wrapped)
-              : 0;
+            node.gainNode.gain.value =
+              aClip && !mutedTracks.has(aClip.trackId || 'a1')
+                ? computeAudioClipGain(aClip, wrapped)
+                : 0;
           } else {
-            const item = plan.schedule.find((s) => s.clip.id === node.id);
+            const item = allScheduleItems.find((s) => s.clip.id === node.id);
             const active =
               item &&
+              !mutedTracks.has(item.clip.trackId || 'v1') &&
               wrapped >= item.startTime &&
               wrapped <= item.endTime &&
               !item.clip.muted;
@@ -409,26 +423,31 @@ export default function App() {
     exportStatus,
   ]);
 
-  // Multi-clip Web Audio scheduling for live preview
+  // Multi-clip Web Audio scheduling for live preview across all tracks
   const audioGraphSignature = useMemo(
     () =>
       JSON.stringify({
+        t: tracks.map((tr) => [tr.id, tr.muted]),
         a: audioClips.map((a) => [
           a.id,
+          a.trackId,
           a.startTime,
           a.durationSec,
           a.sourceOffsetSec,
         ]),
-        v: plan.schedule.map((s) => [
-          s.clip.id,
-          s.startTime,
-          s.endTime,
-          s.clip.sourceStartSec,
-          s.clip.speed,
-          s.clip.muted,
-        ]),
+        v: Object.values(plan.trackSchedules)
+          .flat()
+          .map((s) => [
+            s.clip.id,
+            s.clip.trackId,
+            s.startTime,
+            s.endTime,
+            s.clip.sourceStartSec,
+            s.clip.speed,
+            s.clip.muted,
+          ]),
       }),
-    [audioClips, plan.schedule]
+    [tracks, audioClips, plan.trackSchedules]
   );
 
   useEffect(() => {
@@ -464,9 +483,13 @@ export default function App() {
       const nowT = currentTimeRef.current;
       const baseAudioTime = ctx.currentTime + 0.015;
       const nextNodes: ActiveAudioNode[] = [];
+      const mutedTracks = new Set(
+        tracksRef.current.filter((tr) => tr.muted).map((tr) => tr.id)
+      );
 
-      // Schedule Track A1 song clips
+      // Schedule Song Clips across all unmuted Audio Tracks (A1, A2, ...)
       for (const aClip of audioClipsRef.current) {
+        if (mutedTracks.has(aClip.trackId || 'a1')) continue;
         const clipEnd = aClip.startTime + aClip.durationSec;
         if (clipEnd <= nowT + 0.02) continue;
 
@@ -491,10 +514,11 @@ export default function App() {
         nextNodes.push({ kind: 'audio', id: aClip.id, source, gainNode });
       }
 
-      // Schedule unmuted Track V1 video audio
-      for (const item of plan.schedule) {
+      // Schedule unmuted Video Audio across all Video Tracks (V1, V2, ...)
+      for (const item of Object.values(plan.trackSchedules).flat()) {
         const clip = item.clip;
         if (
+          mutedTracks.has(clip.trackId || 'v1') ||
           clip.kind !== 'video' ||
           clip.muted ||
           !clip.audioBuffer ||
@@ -549,7 +573,7 @@ export default function App() {
     audioClips.length,
     audioGraphSignature,
     audioSyncEpoch,
-    plan.schedule,
+    plan.trackSchedules,
     stopPreviewAudioNodes,
   ]);
 
@@ -581,7 +605,8 @@ export default function App() {
     async (
       files: FileList | File[],
       targetTrack?: 'video' | 'audio',
-      atTimeSec?: number
+      atTimeSec?: number,
+      targetTrackId?: string
     ) => {
       try {
         const decodedAssets = await filesToMediaAssets(files);
@@ -603,10 +628,22 @@ export default function App() {
         let nextSelection: SelectionTarget = null;
 
         if (visualAssets.length > 0 && targetTrack !== 'audio') {
-          const newClips = visualAssets.map((a) =>
-            createTimelineClipFromAsset(a)
-          );
+          const vTrackId = targetTrackId || 'v1';
+          let vCursor = atTimeSec ?? currentTimeRef.current;
+          const newClips = visualAssets.map((a) => {
+            const c = createTimelineClipFromAsset(a, {
+              trackId: vTrackId,
+              startTime: vTrackId === 'v1' ? undefined : vCursor,
+            });
+            if (vTrackId !== 'v1') {
+              vCursor += c.durationSec;
+            }
+            return c;
+          });
           setClips((prev) => {
+            if (vTrackId !== 'v1') {
+              return [...prev, ...newClips];
+            }
             const sampleAssetIds = new Set(
               assets.filter((a) => a.isSample).map((a) => a.id)
             );
@@ -619,10 +656,12 @@ export default function App() {
         }
 
         if (audioAssets.length > 0) {
+          const aTrackId =
+            targetTrack === 'audio' && targetTrackId ? targetTrackId : 'a1';
           let cursor = atTimeSec ?? currentTimeRef.current;
           const newAudioClips: AudioClip[] = [];
           for (const aAsset of audioAssets) {
-            const created = createAudioClipFromAsset(aAsset, cursor);
+            const created = createAudioClipFromAsset(aAsset, cursor, aTrackId);
             if (created) {
               newAudioClips.push(created);
               cursor += created.durationSec;
@@ -674,10 +713,16 @@ export default function App() {
   }, []);
 
   const handleAddAssetToTimeline = useCallback(
-    (asset: MediaAsset, insertIndex?: number, audioStartTime?: number) => {
+    (
+      asset: MediaAsset,
+      trackId?: string,
+      insertIndexOrTime?: number,
+      audioStartTime?: number
+    ) => {
       if (asset.kind === 'audio') {
+        const aTrackId = trackId || 'a1';
         const startAt = audioStartTime ?? currentTimeRef.current;
-        const aClip = createAudioClipFromAsset(asset, startAt);
+        const aClip = createAudioClipFromAsset(asset, startAt, aTrackId);
         if (!aClip) return;
         setAudioClips((prev) => [...prev, aClip]);
         setSelection({ type: 'audio', id: aClip.id });
@@ -686,16 +731,29 @@ export default function App() {
         return;
       }
 
-      const newClip = createTimelineClipFromAsset(asset);
+      const vTrackId = trackId || 'v1';
+      const newClip = createTimelineClipFromAsset(asset, {
+        trackId: vTrackId,
+        startTime:
+          vTrackId !== 'v1'
+            ? typeof insertIndexOrTime === 'number'
+              ? insertIndexOrTime
+              : currentTimeRef.current
+            : undefined,
+      });
+
       setClips((prev) => {
         if (
-          typeof insertIndex === 'number' &&
-          insertIndex >= 0 &&
-          insertIndex <= prev.length
+          vTrackId === 'v1' &&
+          typeof insertIndexOrTime === 'number' &&
+          insertIndexOrTime >= 0
         ) {
-          const copy = [...prev];
-          copy.splice(insertIndex, 0, newClip);
-          return copy;
+          const v1Clips = prev.filter((c) => (c.trackId || 'v1') === 'v1');
+          const overlayClips = prev.filter((c) => (c.trackId || 'v1') !== 'v1');
+          const clampedIdx = Math.min(insertIndexOrTime, v1Clips.length);
+          const copy = [...v1Clips];
+          copy.splice(clampedIdx, 0, newClip);
+          return [...copy, ...overlayClips];
         }
         return [...prev, newClip];
       });
@@ -707,19 +765,19 @@ export default function App() {
   );
 
   const handleDropAssetToVideoTrack = useCallback(
-    (assetId: string, insertIndex?: number) => {
+    (assetId: string, trackId: string, insertIndexOrTime?: number) => {
       const asset = assets.find((a) => a.id === assetId);
       if (!asset || asset.kind === 'audio') return;
-      handleAddAssetToTimeline(asset, insertIndex);
+      handleAddAssetToTimeline(asset, trackId, insertIndexOrTime);
     },
     [assets, handleAddAssetToTimeline]
   );
 
   const handleDropAssetToAudioTrack = useCallback(
-    (assetId: string, startTime: number) => {
+    (assetId: string, trackId: string, startTime: number) => {
       const asset = assets.find((a) => a.id === assetId);
       if (!asset || asset.kind !== 'audio') return;
-      handleAddAssetToTimeline(asset, undefined, startTime);
+      handleAddAssetToTimeline(asset, trackId, undefined, startTime);
     },
     [assets, handleAddAssetToTimeline]
   );
@@ -747,6 +805,7 @@ export default function App() {
         createTimelineClipFromAsset(a)
       );
       setAssets(sampleAssets);
+      setTracks(DEFAULT_TRACKS);
       setClips(initialClips);
       setAudioClips([]);
       setSelection(
@@ -763,28 +822,132 @@ export default function App() {
       setIsPlaying(true);
     } catch {
       setAssets([]);
+      setTracks(DEFAULT_TRACKS);
       setClips([]);
       setAudioClips([]);
       setSelection(null);
     }
   }, []);
 
+  const handleAddTrack = useCallback((kind: 'video' | 'audio') => {
+    setTracks((prev) => {
+      const prefix = kind === 'video' ? 'v' : 'a';
+      const maxNum = prev
+        .filter((t) => t.kind === kind)
+        .reduce((max, t) => {
+          const parsed = Number.parseInt(t.id.replace(/^\D+/, ''), 10);
+          return Number.isFinite(parsed) ? Math.max(max, parsed) : max;
+        }, 1);
+      const nextNum = maxNum + 1;
+      const nextTrack: TimelineTrack = {
+        id: `${prefix}${nextNum}`,
+        kind,
+        label: `Track ${prefix.toUpperCase()}${nextNum}`,
+        muted: false,
+        ...(kind === 'video' ? { hidden: false } : {}),
+      };
+      return [...prev, nextTrack];
+    });
+  }, []);
+
+  const handleRemoveTrack = useCallback((trackId: string) => {
+    if (trackId === 'v1' || trackId === 'a1') return;
+    setTracks((prev) => prev.filter((t) => t.id !== trackId));
+    setClips((prev) => prev.filter((c) => (c.trackId || 'v1') !== trackId));
+    setAudioClips((prev) =>
+      prev.filter((a) => (a.trackId || 'a1') !== trackId)
+    );
+    setExportStatus('idle');
+  }, []);
+
+  const handleToggleTrackMute = useCallback((trackId: string) => {
+    setTracks((prev) =>
+      prev.map((t) => (t.id === trackId ? { ...t, muted: !t.muted } : t))
+    );
+    setExportStatus('idle');
+  }, []);
+
+  const handleToggleTrackHidden = useCallback((trackId: string) => {
+    setTracks((prev) =>
+      prev.map((t) => (t.id === trackId ? { ...t, hidden: !t.hidden } : t))
+    );
+    setExportStatus('idle');
+  }, []);
+
+  const handleMoveClipToTrack = useCallback(
+    (kind: 'clip' | 'audio', id: string, nextTrackId: string) => {
+      if (kind === 'audio') {
+        setAudioClips((prev) =>
+          prev.map((a) => (a.id === id ? { ...a, trackId: nextTrackId } : a))
+        );
+        setExportStatus('idle');
+        return;
+      }
+
+      const scheduleItem = Object.values(plan.trackSchedules)
+        .flat()
+        .find((s) => s.clip.id === id);
+
+      setClips((prev) =>
+        prev.map((c) => {
+          if (c.id !== id) return c;
+          const prevTrackId = c.trackId || 'v1';
+          if (prevTrackId === nextTrackId) return c;
+          if (nextTrackId === 'v1') {
+            return {
+              ...c,
+              trackId: 'v1',
+              startTime: undefined,
+              layoutPreset: 'full',
+              layerScale: 1,
+              layerX: 0,
+              layerY: 0,
+            };
+          }
+          const initialStart =
+            c.startTime ?? scheduleItem?.startTime ?? currentTimeRef.current;
+          return {
+            ...c,
+            trackId: nextTrackId,
+            startTime: Number(Math.max(0, initialStart).toFixed(2)),
+            layoutPreset:
+              c.layoutPreset && c.layoutPreset !== 'full'
+                ? c.layoutPreset
+                : 'pip-tr',
+            layerScale:
+              c.layerScale !== undefined && c.layerScale < 0.99
+                ? c.layerScale
+                : 0.42,
+            layerX: c.layerX ?? 0.25,
+            layerY: c.layerY ?? -0.22,
+            layerOpacity: c.layerOpacity ?? 1,
+            blendMode: c.blendMode ?? 'source-over',
+          };
+        })
+      );
+      setExportStatus('idle');
+    },
+    [plan.trackSchedules]
+  );
+
   const handleReorderVideoClip = useCallback(
     (fromIndex: number, toIndex: number) => {
       setClips((prev) => {
+        const v1Clips = prev.filter((c) => (c.trackId || 'v1') === 'v1');
+        const overlayClips = prev.filter((c) => (c.trackId || 'v1') !== 'v1');
         if (
           fromIndex < 0 ||
           toIndex < 0 ||
-          fromIndex >= prev.length ||
-          toIndex >= prev.length ||
+          fromIndex >= v1Clips.length ||
+          toIndex >= v1Clips.length ||
           fromIndex === toIndex
         ) {
           return prev;
         }
-        const copy = [...prev];
+        const copy = [...v1Clips];
         const [moved] = copy.splice(fromIndex, 1);
         copy.splice(toIndex, 0, moved);
-        return copy;
+        return [...copy, ...overlayClips];
       });
       setExportStatus('idle');
     },
@@ -821,7 +984,8 @@ export default function App() {
     if (!selection) return;
 
     if (selection.type === 'clip') {
-      const item = plan.schedule.find((s) => s.clip.id === selection.id);
+      const allItems = Object.values(plan.trackSchedules).flat();
+      const item = allItems.find((s) => s.clip.id === selection.id);
       if (!item) return;
 
       const splitLocalTime = currentTimeRef.current - item.startTime;
@@ -839,6 +1003,9 @@ export default function App() {
 
       const rightClone = cloneTimelineClip(item.clip);
       rightClone.durationSec = Math.max(0.5, rightDuration);
+      if ((item.clip.trackId || 'v1') !== 'v1') {
+        rightClone.startTime = Number((item.startTime + leftDuration).toFixed(2));
+      }
       if (rightClone.kind === 'video') {
         rightClone.sourceStartSec = Number(
           (item.clip.sourceStartSec + leftDuration * item.clip.speed).toFixed(2)
@@ -889,7 +1056,7 @@ export default function App() {
       setSelection({ type: 'audio', id: rightClip.id });
       setExportStatus('idle');
     }
-  }, [selection, plan.schedule, audioClips]);
+  }, [selection, plan.trackSchedules, audioClips]);
 
   const handleDuplicateSelected = useCallback(() => {
     if (!selection) return;
@@ -897,6 +1064,11 @@ export default function App() {
       const target = clips.find((c) => c.id === selection.id);
       if (!target) return;
       const cloned = cloneTimelineClip(target);
+      if ((target.trackId || 'v1') !== 'v1') {
+        cloned.startTime = Number(
+          ((target.startTime ?? 0) + target.durationSec).toFixed(2)
+        );
+      }
       setClips((prev) => {
         const idx = prev.findIndex((c) => c.id === target.id);
         if (idx === -1) return prev;
@@ -941,7 +1113,8 @@ export default function App() {
 
   const handleFitTotalDuration = useCallback(
     (targetSeconds: number) => {
-      if (clips.length === 0) return;
+      const v1Clips = clips.filter((c) => (c.trackId || 'v1') === 'v1');
+      if (v1Clips.length === 0) return;
       const clampedTarget = Math.max(10, Math.min(60, targetSeconds));
       const introOverlap = intro.enabled
         ? Math.max(0.35, intro.durationSec - 0.45)
@@ -954,13 +1127,14 @@ export default function App() {
         plan.slidesEnd - plan.slidesStart
       );
       const desiredVisualSpan = Math.max(
-        clips.length * 0.8,
+        v1Clips.length * 0.8,
         clampedTarget - introOverlap - outroOverlap
       );
       const ratio = desiredVisualSpan / currentVisualSpan;
 
       setClips((prev) =>
         prev.map((clip) => {
+          if ((clip.trackId || 'v1') !== 'v1') return clip;
           const scaled = Math.max(0.8, Number((clip.durationSec * ratio).toFixed(2)));
           if (clip.kind === 'video') {
             const maxDur = Math.max(
@@ -974,7 +1148,7 @@ export default function App() {
       );
       setExportStatus('idle');
     },
-    [clips.length, intro.enabled, intro.durationSec, outro.enabled, outro.durationSec, plan.slidesEnd, plan.slidesStart]
+    [clips, intro.enabled, intro.durationSec, outro.enabled, outro.durationSec, plan.slidesEnd, plan.slidesStart]
   );
 
   const handleApplyAnimationToAll = useCallback((anim: AnimationId) => {
@@ -1075,6 +1249,7 @@ export default function App() {
         intro,
         outro,
         audioClips,
+        tracks,
         signal: controller.signal,
         onProgress: (pct, elapsed) => {
           setExportProgressPct(pct);
@@ -1108,6 +1283,7 @@ export default function App() {
   }, [
     clips.length,
     audioClips,
+    tracks,
     exportStatus,
     exportResult,
     plan,
@@ -1135,10 +1311,11 @@ export default function App() {
   const selectedScheduleItem = useMemo(() => {
     if (!selectedVideoClip) return null;
     return (
-      plan.schedule.find((item) => item.clip.id === selectedVideoClip.id) ??
-      null
+      Object.values(plan.trackSchedules)
+        .flat()
+        .find((item) => item.clip.id === selectedVideoClip.id) ?? null
     );
-  }, [plan.schedule, selectedVideoClip]);
+  }, [plan.trackSchedules, selectedVideoClip]);
 
   const selectedAudioClip = useMemo(() => {
     if (selection?.type === 'audio') {
@@ -1190,6 +1367,7 @@ export default function App() {
 
           <PreviewStage
             plan={plan}
+            tracks={tracks}
             themeId={themeId}
             currentTimeSec={currentTimeSec}
             isPlaying={isPlaying}
@@ -1221,6 +1399,7 @@ export default function App() {
           <StudioControls
             activeTab={activeTab}
             onTabChange={setActiveTab}
+            tracks={tracks}
             selectedTheme={themeId}
             totalDurationSec={plan.totalDuration}
             clipCount={clips.length}
@@ -1254,6 +1433,7 @@ export default function App() {
               setExportFormat(fmt);
               setExportStatus('idle');
             }}
+            onMoveClipToTrack={handleMoveClipToTrack}
             onUpdateVideoClip={handleUpdateVideoClip}
             onUpdateAudioClip={handleUpdateAudioClip}
             onDeleteAudioClip={handleDeleteAudioClip}
@@ -1293,10 +1473,10 @@ export default function App() {
           />
         </div>
 
-        {/* Multi-Track NLE Timeline (Track V1 Video/Photos + Track A1 Song Clips) */}
+        {/* Dynamic Multi-Track NLE Timeline (V1, V2... + A1, A2...) */}
         <TimelineEditor
           plan={plan}
-          clips={clips}
+          tracks={tracks}
           audioClips={audioClips}
           assets={assets}
           selection={selection}
@@ -1307,6 +1487,10 @@ export default function App() {
           onSplitAtPlayhead={handleSplitAtPlayhead}
           onDuplicateSelected={handleDuplicateSelected}
           onDeleteSelected={handleDeleteSelected}
+          onAddTrack={handleAddTrack}
+          onRemoveTrack={handleRemoveTrack}
+          onToggleTrackMute={handleToggleTrackMute}
+          onToggleTrackHidden={handleToggleTrackHidden}
           onReorderVideoClip={handleReorderVideoClip}
           onTrimVideoClip={handleUpdateVideoClip}
           onUpdateAudioClip={handleUpdateAudioClip}

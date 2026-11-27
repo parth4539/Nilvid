@@ -8,6 +8,25 @@ export type ExportFormat = 'mp4' | 'mov' | 'webm';
 
 export type MediaKind = 'image' | 'video' | 'audio';
 
+export type ClipBlendMode = 'source-over' | 'screen' | 'overlay' | 'lighten';
+
+export type ClipLayoutPreset =
+  | 'full'
+  | 'pip-tr'
+  | 'pip-br'
+  | 'pip-tl'
+  | 'pip-bl'
+  | 'split-left'
+  | 'split-right';
+
+export interface TimelineTrack {
+  id: string;
+  kind: 'video' | 'audio';
+  label: string;
+  muted: boolean;
+  hidden?: boolean;
+}
+
 export type AnimationId =
   | 'ken-burns-in'
   | 'ken-burns-out'
@@ -100,6 +119,8 @@ export interface MediaAsset {
 export interface TimelineClip {
   id: string;
   assetId: string;
+  trackId: string;
+  startTime?: number; // Explicit timeline position for parallel tracks (V2+)
   kind: 'image' | 'video';
   name: string;
   url: string;
@@ -125,11 +146,18 @@ export interface TimelineClip {
   caption?: string;
   captionPosition?: CaptionPosition;
   captionAnimation?: TextAnimationId;
+  layoutPreset?: ClipLayoutPreset;
+  layerScale?: number; // 0.2 - 1.0
+  layerX?: number; // -0.5 to 0.5 normalized offset
+  layerY?: number; // -0.5 to 0.5 normalized offset
+  layerOpacity?: number; // 0.05 - 1.0
+  blendMode?: ClipBlendMode;
 }
 
 export interface AudioClip {
   id: string;
   assetId: string;
+  trackId: string;
   name: string;
   buffer: AudioBuffer;
   waveformPeaks: number[];
@@ -196,6 +224,7 @@ export interface RenderPlan {
   slidesStart: number;
   slidesEnd: number;
   schedule: ClipScheduleItem[];
+  trackSchedules: Record<string, ClipScheduleItem[]>;
 }
 
 export type SelectionTarget =

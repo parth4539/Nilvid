@@ -22,6 +22,7 @@ import {
   ParticleOverlayId,
   RenderPlan,
   ThemeId,
+  TimelineTrack,
   TitleCardConfig,
 } from '../types/studio';
 import {
@@ -42,6 +43,7 @@ export interface ExportVideoOptions {
   intro: TitleCardConfig;
   outro: TitleCardConfig;
   audioClips: AudioClip[];
+  tracks?: TimelineTrack[];
   signal?: AbortSignal;
   onProgress: (progressPct: number, elapsedSec: number) => void;
   onPreviewFrame?: (canvas: HTMLCanvasElement, timeSec: number) => void;
@@ -50,16 +52,22 @@ export interface ExportVideoOptions {
 async function renderOfflineAudioMix(
   plan: RenderPlan,
   audioClips: AudioClip[],
-  durationSec: number
+  durationSec: number,
+  mutedTrackIds: Set<string>
 ): Promise<AudioBuffer | null> {
-  const hasVideoAudio = plan.schedule.some(
+  const allScheduleItems = Object.values(plan.trackSchedules).flat();
+  const activeAudioClips = audioClips.filter(
+    (ac) => !mutedTrackIds.has(ac.trackId || 'a1')
+  );
+  const hasVideoAudio = allScheduleItems.some(
     (item) =>
+      !mutedTrackIds.has(item.clip.trackId || 'v1') &&
       item.clip.kind === 'video' &&
       !item.clip.muted &&
       item.clip.volume > 0 &&
       item.clip.audioBuffer
   );
-  if (audioClips.length === 0 && !hasVideoAudio) {
+  if (activeAudioClips.length === 0 && !hasVideoAudio) {
     return null;
   }
 
@@ -75,8 +83,8 @@ async function renderOfflineAudioMix(
   const totalSamples = Math.max(1, Math.ceil(durationSec * sampleRate));
   const offlineCtx = new OfflineCtx(2, totalSamples, sampleRate);
 
-  // Schedule Track A1 Song Clips
-  for (const aClip of audioClips) {
+  // Schedule Song Clips across all unmuted Audio Tracks (A1, A2, ...)
+  for (const aClip of activeAudioClips) {
     if (aClip.durationSec <= 0.05 || aClip.startTime >= durationSec) continue;
     const source = offlineCtx.createBufferSource();
     source.buffer = aClip.buffer;
@@ -113,10 +121,11 @@ async function renderOfflineAudioMix(
     source.start(clipStart, srcOffset, activeDur);
   }
 
-  // Schedule Unmuted Video Clip Audio
-  for (const item of plan.schedule) {
+  // Schedule Unmuted Video Clip Audio across all Video Tracks (V1, V2, ...)
+  for (const item of allScheduleItems) {
     const clip = item.clip;
     if (
+      mutedTrackIds.has(clip.trackId || 'v1') ||
       clip.kind !== 'video' ||
       clip.muted ||
       clip.volume <= 0 ||
@@ -176,10 +185,14 @@ async function exportWithMediabunny(
     intro,
     outro,
     audioClips,
+    tracks,
     signal,
     onProgress,
     onPreviewFrame,
   } = options;
+  const mutedTrackIds = new Set(
+    (tracks ?? []).filter((t) => t.muted).map((t) => t.id)
+  );
 
   const fps = 30;
   const videoBitsPerSecond = resolution === '1080p' ? 8_000_000 : 4_500_000;
@@ -233,7 +246,8 @@ async function exportWithMediabunny(
   const mixedAudioBuffer = await renderOfflineAudioMix(
     plan,
     audioClips,
-    durationSec
+    durationSec,
+    mutedTrackIds
   );
   let audioSource: AudioBufferSource | null = null;
   let hasAudio = false;
@@ -288,7 +302,8 @@ async function exportWithMediabunny(
 
     const totalFrames = Math.max(1, Math.ceil(durationSec * fps));
     const frameDuration = 1 / fps;
-    const hasVideoClips = plan.schedule.some((s) => s.clip.kind === 'video');
+    const allScheduleItems = Object.values(plan.trackSchedules).flat();
+    const hasVideoClips = allScheduleItems.some((s) => s.clip.kind === 'video');
     let lastUiUpdateMs = 0;
 
     for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
@@ -315,7 +330,8 @@ async function exportWithMediabunny(
         colorGrade,
         particleOverlay,
         intro,
-        outro
+        outro,
+        tracks
       );
 
       await videoSource.add(timestampSec, frameDuration);
@@ -437,13 +453,21 @@ async function exportWithMediaRecorder(
     intro,
     outro,
     audioClips,
+    tracks,
     signal,
     onProgress,
     onPreviewFrame,
   } = options;
+  const mutedTrackIds = new Set(
+    (tracks ?? []).filter((t) => t.muted).map((t) => t.id)
+  );
+  const allScheduleItems = Object.values(plan.trackSchedules).flat();
+  const activeAudioClips = audioClips.filter(
+    (ac) => !mutedTrackIds.has(ac.trackId || 'a1')
+  );
 
   // Pre-seek all video clips to their trim start so initial playback is crisp
-  for (const item of plan.schedule) {
+  for (const item of allScheduleItems) {
     if (item.clip.kind === 'video' && item.clip.videoElement) {
       try {
         item.clip.videoElement.pause();
@@ -470,7 +494,8 @@ async function exportWithMediaRecorder(
     colorGrade,
     particleOverlay,
     intro,
-    outro
+    outro,
+    tracks
   );
   onPreviewFrame?.(exportCanvas, 0);
 
@@ -480,14 +505,15 @@ async function exportWithMediaRecorder(
   let audioCtx: AudioContext | null = null;
   const scheduledSources: AudioBufferSourceNode[] = [];
 
-  const hasVideoAudio = plan.schedule.some(
+  const hasVideoAudio = allScheduleItems.some(
     (item) =>
+      !mutedTrackIds.has(item.clip.trackId || 'v1') &&
       item.clip.kind === 'video' &&
       !item.clip.muted &&
       item.clip.volume > 0 &&
       item.clip.audioBuffer
   );
-  const shouldIncludeAudio = audioClips.length > 0 || hasVideoAudio;
+  const shouldIncludeAudio = activeAudioClips.length > 0 || hasVideoAudio;
   let hasAudio = false;
 
   if (shouldIncludeAudio) {
@@ -503,7 +529,7 @@ async function exportWithMediaRecorder(
       const dest = audioCtx.createMediaStreamDestination();
       const baseTime = audioCtx.currentTime + 0.02;
 
-      for (const aClip of audioClips) {
+      for (const aClip of activeAudioClips) {
         if (aClip.durationSec <= 0.05) continue;
         const source = audioCtx.createBufferSource();
         source.buffer = aClip.buffer;
@@ -540,9 +566,10 @@ async function exportWithMediaRecorder(
         scheduledSources.push(source);
       }
 
-      for (const item of plan.schedule) {
+      for (const item of allScheduleItems) {
         const clip = item.clip;
         if (
+          mutedTrackIds.has(clip.trackId || 'v1') ||
           clip.kind !== 'video' ||
           clip.muted ||
           clip.volume <= 0 ||
@@ -706,7 +733,8 @@ async function exportWithMediaRecorder(
         colorGrade,
         particleOverlay,
         intro,
-        outro
+        outro,
+        tracks
       );
       onPreviewFrame?.(exportCanvas, clampedTime);
 
@@ -746,7 +774,8 @@ async function exportWithMediaRecorder(
           colorGrade,
           particleOverlay,
           intro,
-          outro
+          outro,
+          tracks
         );
         recorder.stop();
       }
@@ -759,7 +788,10 @@ export async function exportSlideshowVideo(
 ): Promise<ExportResult> {
   const { plan, aspectRatio, resolution, format, audioClips } = options;
 
-  if (plan.schedule.length === 0 && audioClips.length === 0) {
+  const hasVisualClips = Object.values(plan.trackSchedules).some(
+    (list) => list.length > 0
+  );
+  if (!hasVisualClips && audioClips.length === 0) {
     throw new Error('Add at least one image or video clip before exporting.');
   }
 

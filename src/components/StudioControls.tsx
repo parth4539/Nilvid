@@ -27,6 +27,8 @@ import {
   AnimationId,
   AudioClip,
   CaptionPosition,
+  ClipBlendMode,
+  ClipLayoutPreset,
   ClipScheduleItem,
   ColorFilterId,
   ColorGradeConfig,
@@ -40,6 +42,7 @@ import {
   TextAnimationId,
   ThemeId,
   TimelineClip,
+  TimelineTrack,
   TitleCardConfig,
   TransitionId,
 } from '../types/studio';
@@ -47,6 +50,7 @@ import {
 interface StudioControlsProps {
   activeTab: InspectorTab;
   onTabChange: (tab: InspectorTab) => void;
+  tracks: TimelineTrack[];
   selectedTheme: ThemeId;
   totalDurationSec: number;
   clipCount: number;
@@ -71,6 +75,7 @@ interface StudioControlsProps {
   onFitTotalDuration: (targetSeconds: number) => void;
   onResolutionChange: (res: ExportResolution) => void;
   onFormatChange: (fmt: ExportFormat) => void;
+  onMoveClipToTrack: (kind: 'clip' | 'audio', id: string, nextTrackId: string) => void;
   onUpdateVideoClip: (clipId: string, patch: Partial<TimelineClip>) => void;
   onUpdateAudioClip: (audioClipId: string, patch: Partial<AudioClip>) => void;
   onDeleteAudioClip: (audioClipId: string) => void;
@@ -98,6 +103,29 @@ const CAPTION_POSITIONS: { id: CaptionPosition; label: string }[] = [
   { id: 'bottom-left', label: 'Bottom Left' },
   { id: 'top-center', label: 'Top Center' },
   { id: 'center', label: 'Center' },
+];
+
+const LAYOUT_PRESETS: {
+  id: ClipLayoutPreset;
+  label: string;
+  scale: number;
+  x: number;
+  y: number;
+}[] = [
+  { id: 'full', label: 'Full', scale: 1, x: 0, y: 0 },
+  { id: 'pip-tr', label: 'PiP TR', scale: 0.42, x: 0.25, y: -0.22 },
+  { id: 'pip-br', label: 'PiP BR', scale: 0.42, x: 0.25, y: 0.22 },
+  { id: 'pip-tl', label: 'PiP TL', scale: 0.42, x: -0.25, y: -0.22 },
+  { id: 'pip-bl', label: 'PiP BL', scale: 0.42, x: -0.25, y: 0.22 },
+  { id: 'split-left', label: 'Split L', scale: 0.5, x: -0.25, y: 0 },
+  { id: 'split-right', label: 'Split R', scale: 0.5, x: 0.25, y: 0 },
+];
+
+const BLEND_MODES: { id: ClipBlendMode; label: string }[] = [
+  { id: 'source-over', label: 'Normal' },
+  { id: 'screen', label: 'Screen (Glow)' },
+  { id: 'overlay', label: 'Overlay' },
+  { id: 'lighten', label: 'Lighten' },
 ];
 
 const ANIM_CATEGORIES = [
@@ -148,6 +176,7 @@ function renderThemeSwatch(id: ThemeId) {
 export const StudioControls: React.FC<StudioControlsProps> = ({
   activeTab,
   onTabChange,
+  tracks,
   selectedTheme,
   totalDurationSec,
   clipCount,
@@ -172,6 +201,7 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
   onFitTotalDuration,
   onResolutionChange,
   onFormatChange,
+  onMoveClipToTrack,
   onUpdateVideoClip,
   onUpdateAudioClip,
   onDeleteAudioClip,
@@ -196,6 +226,8 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
     Math.min(60, Math.max(10, Math.round(totalDurationSec)))
   );
   const audioInputRef = useRef<HTMLInputElement | null>(null);
+  const videoTracks = tracks.filter((t) => t.kind === 'video');
+  const audioTracks = tracks.filter((t) => t.kind === 'audio');
 
   const filteredAnimations =
     animCategory === 'All'
@@ -298,6 +330,32 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
                 </button>
 
                 <div className="space-y-3">
+                  {audioTracks.length > 0 && (
+                    <div>
+                      <label
+                        htmlFor="audio-track-select"
+                        className="text-xs text-slate-400 block mb-1"
+                      >
+                        Audio Track
+                      </label>
+                      <select
+                        id="audio-track-select"
+                        disabled={isExporting}
+                        value={selectedAudioClip.trackId || 'a1'}
+                        onChange={(e) =>
+                          onMoveClipToTrack('audio', selectedAudioClip.id, e.target.value)
+                        }
+                        className="w-full px-3 py-2 min-h-[36px] rounded-lg bg-[#090E1B] border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-[#38BDF8]"
+                      >
+                        {audioTracks.map((tr) => (
+                          <option key={tr.id} value={tr.id}>
+                            {tr.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
                   <div>
                     <div className="flex justify-between text-xs mb-1">
                       <span className="text-slate-400">Timeline Start</span>
@@ -459,6 +517,182 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
                     <RotateCcw className="w-3 h-3" aria-hidden="true" />
                     <span>Auto All</span>
                   </button>
+                </div>
+
+                {/* Track & Parallel Layer Controls */}
+                <div className="p-3 rounded-xl bg-[#090E1B] border border-slate-800 space-y-3">
+                  <div>
+                    <label
+                      htmlFor="video-track-select"
+                      className="text-xs text-slate-400 block mb-1"
+                    >
+                      Timeline Track
+                    </label>
+                    <select
+                      id="video-track-select"
+                      disabled={isExporting}
+                      value={selectedVideoClip.trackId || 'v1'}
+                      onChange={(e) =>
+                        onMoveClipToTrack('clip', selectedVideoClip.id, e.target.value)
+                      }
+                      className="w-full px-3 py-2 min-h-[36px] rounded-lg bg-[#0E1424] border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-[#38BDF8]"
+                    >
+                      {videoTracks.map((tr) => (
+                        <option key={tr.id} value={tr.id}>
+                          {tr.label} {tr.id === 'v1' ? '(Main Sequence)' : '(Parallel Layer)'}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {(selectedVideoClip.trackId || 'v1') !== 'v1' && (
+                    <>
+                      <div>
+                        <div className="flex justify-between text-xs mb-1">
+                          <span className="text-slate-400">Timeline Start</span>
+                          <span className="font-mono text-sky-300">
+                            {(selectedVideoClip.startTime ?? 0).toFixed(1)}s
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={Math.max(30, Math.ceil(totalDurationSec))}
+                          step={0.25}
+                          disabled={isExporting}
+                          value={selectedVideoClip.startTime ?? 0}
+                          onChange={(e) =>
+                            onUpdateVideoClip(selectedVideoClip.id, {
+                              startTime: Number(e.target.value),
+                            })
+                          }
+                          className="studio-slider w-full"
+                        />
+                      </div>
+
+                      <div className="space-y-2 pt-1 border-t border-slate-800/70">
+                        <span className="text-xs font-semibold text-slate-200 block">
+                          Layer & PiP Layout
+                        </span>
+                        <div className="grid grid-cols-4 gap-1">
+                          {LAYOUT_PRESETS.map((p) => {
+                            const active =
+                              (selectedVideoClip.layoutPreset ?? 'pip-tr') === p.id;
+                            return (
+                              <button
+                                key={p.id}
+                                type="button"
+                                disabled={isExporting}
+                                onClick={() =>
+                                  onUpdateVideoClip(selectedVideoClip.id, {
+                                    layoutPreset: p.id,
+                                    layerScale: p.scale,
+                                    layerX: p.x,
+                                    layerY: p.y,
+                                  })
+                                }
+                                className={`py-1 px-1 rounded text-[10px] font-medium border cursor-pointer transition-colors ${
+                                  active
+                                    ? 'bg-[#172554] border-sky-500/50 text-sky-100'
+                                    : 'bg-[#0E1424] border-slate-800 text-slate-400 hover:text-slate-200'
+                                }`}
+                              >
+                                {p.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        {selectedVideoClip.layoutPreset !== 'split-left' &&
+                          selectedVideoClip.layoutPreset !== 'split-right' && (
+                            <div>
+                              <div className="flex justify-between text-xs mb-1">
+                                <span className="text-slate-400">Layer Size</span>
+                                <span className="font-mono text-slate-200">
+                                  {Math.round((selectedVideoClip.layerScale ?? 0.42) * 100)}%
+                                </span>
+                              </div>
+                              <input
+                                type="range"
+                                min={20}
+                                max={100}
+                                step={2}
+                                disabled={isExporting}
+                                value={Math.round(
+                                  (selectedVideoClip.layerScale ?? 0.42) * 100
+                                )}
+                                onChange={(e) => {
+                                  const nextScale = Number(e.target.value) / 100;
+                                  onUpdateVideoClip(selectedVideoClip.id, {
+                                    layerScale: nextScale,
+                                    layoutPreset:
+                                      nextScale >= 0.99
+                                        ? 'full'
+                                        : selectedVideoClip.layoutPreset === 'full'
+                                        ? 'pip-tr'
+                                        : selectedVideoClip.layoutPreset ?? 'pip-tr',
+                                  });
+                                }}
+                                className="studio-slider w-full"
+                              />
+                            </div>
+                          )}
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <div className="flex justify-between text-xs mb-1">
+                              <span className="text-slate-400">Opacity</span>
+                              <span className="font-mono text-slate-200">
+                                {Math.round((selectedVideoClip.layerOpacity ?? 1) * 100)}%
+                              </span>
+                            </div>
+                            <input
+                              type="range"
+                              min={10}
+                              max={100}
+                              step={5}
+                              disabled={isExporting}
+                              value={Math.round(
+                                (selectedVideoClip.layerOpacity ?? 1) * 100
+                              )}
+                              onChange={(e) =>
+                                onUpdateVideoClip(selectedVideoClip.id, {
+                                  layerOpacity: Number(e.target.value) / 100,
+                                })
+                              }
+                              className="studio-slider w-full"
+                            />
+                          </div>
+
+                          <div>
+                            <label
+                              htmlFor="layer-blend-select"
+                              className="text-xs text-slate-400 block mb-1"
+                            >
+                              Blend
+                            </label>
+                            <select
+                              id="layer-blend-select"
+                              disabled={isExporting}
+                              value={selectedVideoClip.blendMode ?? 'source-over'}
+                              onChange={(e) =>
+                                onUpdateVideoClip(selectedVideoClip.id, {
+                                  blendMode: e.target.value as ClipBlendMode,
+                                })
+                              }
+                              className="w-full px-2 py-1 min-h-[28px] rounded-md bg-[#0E1424] border border-slate-800 text-[11px] text-slate-200 focus:outline-none focus:border-[#38BDF8]"
+                            >
+                              {BLEND_MODES.map((b) => (
+                                <option key={b.id} value={b.id}>
+                                  {b.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 {/* Split & Trim Controls */}
@@ -1312,7 +1546,7 @@ export const StudioControls: React.FC<StudioControlsProps> = ({
             <div className="space-y-2.5">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="font-display text-sm font-semibold text-slate-100">
-                  Song Clips (Track A1)
+                  Song Clips (Audio Tracks)
                 </h2>
                 <span className="font-mono text-xs text-slate-400">
                   {audioClipsCount} active
